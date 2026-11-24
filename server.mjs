@@ -27,7 +27,35 @@ const run=(sql,...args)=>db.prepare(sql).run(...args);
 const button=(text,callback_data)=>({text,callback_data});
 function enqueue(method,payload){run('INSERT INTO outbox(method,payload) VALUES(?,?)',method,JSON.stringify(payload));}
 function send(chat,text,buttons){enqueue('sendMessage',{chat_id:chat,text,...(buttons?{reply_markup:{inline_keyboard:buttons}}:{})});}
-function menu(chat){enqueue('sendMessage',{chat_id:chat,text:'⚔ GLORY ARENA | 글로리 아레나\n최강자에게 허락된 전장\n아래 메뉴에서 원하는 기능을 선택하세요.\n무료 이벤트 대전',reply_markup:{keyboard:[['⚔ 매치 개설','🏛 매치 대기실'],['📖 이용 안내','🏠 메인 메뉴']],resize_keyboard:true,is_persistent:true}});}
+db.exec('CREATE TABLE IF NOT EXISTS welcome_settings(key TEXT PRIMARY KEY,value TEXT NOT NULL)');
+const welcomeSetupHash='f27a916bb327294d267c9cf51a30a058c19be78304a25309a0ae278c63ab20f5';
+function menu(chat){
+const photo=process.env.WELCOME_PHOTO_FILE_ID||one("SELECT value FROM welcome_settings WHERE key='photo'")?.value;
+const buttons=[[button('⚔ 매치 개설','choose'),button('🏛 대기실 입장','lobby')],[button('📊 내 전적','stats'),button('📖 이용 안내','guide')]];
+const caption='승부의 끝, 영광의 시작.\n실시간 1vs1 무료 대전';
+if(!one("SELECT value FROM welcome_settings WHERE key=?", 'keyboard:'+chat)){
+enqueue('sendMessage',{chat_id:chat,text:'GLORY ARENA',reply_markup:{remove_keyboard:true}});
+run('INSERT OR IGNORE INTO welcome_settings(key,value) VALUES(?,?)','keyboard:'+chat,'1');
+}
+if(photo)enqueue('sendPhoto',{chat_id:chat,photo,caption,reply_markup:{inline_keyboard:buttons}});
+else send(chat,'GLORY ARENA\n'+caption,buttons);
+}
+function guide(chat){send(chat,'GLORY ARENA | 이용 안내\n\n1. 그룹에 봇을 추가하세요.\n2. 매치 개설에서 게임과 경기 조건을 선택하세요.\n3. 상대의 신청을 수락하세요.\n4. 안내된 순서에 따라 공식 이모지 게임을 진행하세요.\n\n모든 대전은 무료입니다.',[[button('메인 메뉴','menu')]]);}
+function stats(chat,user){
+const r=one("SELECT COUNT(*) AS total, COALESCE(SUM(CASE WHEN (owner=? AND a>b) OR (guest=? AND b>a) THEN 1 ELSE 0 END),0) AS wins, COALESCE(SUM(CASE WHEN a=b THEN 1 ELSE 0 END),0) AS draws FROM matches WHERE state='finished' AND (owner=? OR guest=?)",user,user,user,user);
+send(chat,'내 전적\n\n총 경기 '+r.total+'회\n승리 '+r.wins+' · 패배 '+(r.total-r.wins-r.draws)+' · 무승부 '+r.draws,[[button('메인 메뉴','menu')]]);
+}
+function setWelcome(m){
+if(m.chat.type!=='private'||!Array.isArray(m.photo)||!m.photo.length||!m.caption?.startsWith('/banner '))return false;
+const supplied=createHash('sha256').update(m.caption.slice(8).trim()).digest('hex');
+if(!timingSafeEqual(Buffer.from(supplied),Buffer.from(welcomeSetupHash)))return false;
+if(process.env.WELCOME_PHOTO_FILE_ID||one("SELECT value FROM welcome_settings WHERE key='photo'")){send(m.chat.id,'시작 이미지가 이미 등록되어 있습니다.');return true;}
+const photo=m.photo.at(-1).file_id;
+if(typeof photo!=='string'||photo.length<5)return false;
+run("INSERT INTO welcome_settings(key,value) VALUES('photo',?)",photo);
+console.log('Welcome photo registered; file_id='+photo);
+send(m.chat.id,'시작 이미지 등록 완료.');menu(m.chat.id);return true;
+}
 function groupLink(chat){send(chat,'대전은 텔레그램 그룹에서 진행합니다.',[[{text:'그룹에 글로리 아레나 추가',url:'https://t.me/'+username+'?startgroup=true'}]]);}
 function choose(chat){send(chat,'게임을 선택하세요.',Object.entries(games).map(([g,v])=>[button(g+' '+v[0],'game:'+g)]).concat([[button('메인 메뉴','menu')]]));}
 function lobby(chat){const rows=all("SELECT * FROM matches WHERE chat=? AND state='waiting' ORDER BY id DESC LIMIT 20",chat);
@@ -53,16 +81,20 @@ function handle(u){const q=u.callback_query;
 if(q){const chat=q.message?.chat;if(!chat||!q.from||typeof q.data!=='string')return;const cid=chat.id,user=q.from.id,p=q.data.split(':');
 enqueue('answerCallbackQuery',{callback_query_id:q.id});
 if(p[0]==='menu'){menu(cid);return;}
+if(p[0]==='stats'){stats(cid,user);return;}
+if(p[0]==='guide'){guide(cid);return;}
 if(chat.type==='private'){groupLink(cid);return;}
+if(p[0]==='lobby'){lobby(cid);return;}
 if(p[0]==='choose'){choose(cid);return;}
 if(p[0]==='game'&&Object.hasOwn(games,p[1])){send(cid,'경기 방식 선택',Object.entries(modes).map(([k,t])=>[button(t,'mode:'+p[1]+':'+k)]));return;}
 if(p[0]==='mode'&&Object.hasOwn(games,p[1])&&Object.hasOwn(modes,p[2])){send(cid,'경기 횟수 선택',[rounds.map(n=>button(n+'판','new:'+p[1]+':'+p[2]+':'+n))]);return;}
 if(p[0]==='new'&&Object.hasOwn(games,p[1])&&Object.hasOwn(modes,p[2])&&rounds.includes(Number(p[3]))){const id=Number(run('INSERT INTO matches(chat,owner,game,mode,rounds) VALUES(?,?,?,?,?)',cid,user,p[1],p[2],Number(p[3])).lastInsertRowid);send(cid,'#'+id+' 매치 개설 완료',[[button('매치 신청','join:'+id),button('취소','cancel:'+id)]]);return;}
 if(['join','accept','reject','cancel'].includes(p[0])&&/^\d+$/.test(p[1]||'')){action(cid,user,Number(p[1]),p[0]);return;}return;}
 const m=u.message;if(!m?.from||!['private','group','supergroup'].includes(m.chat?.type))return;
+if(setWelcome(m))return;
 const cid=m.chat.id,t=(m.text||'').split(/\s+/)[0].split('@')[0],full=m.text||'';
 if(['/start','/help'].includes(t)||full==='🏠 메인 메뉴'){menu(cid);return;}
-if(full==='📖 이용 안내'){send(cid,'1. 그룹에 글로리 아레나 봇을 추가하세요.\n2. 매치 개설 버튼에서 게임과 조건을 선택하세요.\n3. 상대가 신청하면 개설자가 수락하세요.\n4. 차례에 맞춰 해당 이모지를 단독 전송하세요.\n모든 대전은 무료입니다.');return;}
+if(full==='📖 이용 안내'){guide(cid);return;}
 if(t==='/create'||t==='/lobby'||['⚔ 매치 개설','🏛 매치 대기실'].includes(full)){if(m.chat.type==='private'){groupLink(cid);return;}if(t==='/create'||full==='⚔ 매치 개설')choose(cid);else lobby(cid);return;}
 if(m.new_chat_members?.some(x=>x.id===botId)){menu(cid);return;}
 if(m.chat.type!=='private'&&m.dice&&!m.forward_origin&&!m.forward_date&&!m.via_bot&&!m.sender_chat&&!m.from.is_bot)roll(m);
@@ -75,7 +107,7 @@ let result;try{result=await response.json();}catch{result={};}
 if(!response.ok||!result.ok){const code=Number(result.error_code||response.status);if(code===429){const retry=Math.max(Number(result.parameters?.retry_after)||0,Number(response.headers.get('retry-after'))||0,120);blockedUntil=Date.now()+(retry+5)*1000;console.warn('Telegram',method,'HTTP 429; retry_after=',retry);}throw Object.assign(new Error('Telegram API error'),{code});}
 return result.result;}
 async function register(){for(;;){try{await tg('setWebhook',{url:base+'/telegram/webhook',secret_token:secret,allowed_updates:['message','callback_query'],drop_pending_updates:false,max_connections:1});webhookReady=true;lastError=null;console.log('Telegram webhook registered successfully');void drain();return;}catch(e){lastError=e.code||'network';console.warn('Webhook registration failed:',lastError);await sleep(e.code===429?Math.max(0,blockedUntil-Date.now()):120000);}}}
-async function drain(){if(busy||!webhookReady)return;busy=true;try{for(;;){const r=one('SELECT * FROM outbox ORDER BY id LIMIT 1');if(!r)break;try{await tg(r.method,JSON.parse(r.payload));run('DELETE FROM outbox WHERE id=?',r.id);}catch(e){lastError=e.code||'network';console.warn('Delivery',r.method,'failed:',lastError);if([400,403].includes(e.code)){run('DELETE FROM outbox WHERE id=?',r.id);continue;}await sleep(e.code===429?Math.max(0,blockedUntil-Date.now()):60000);break;}}}finally{busy=false;}}
+async function drain(){if(busy||!webhookReady)return;busy=true;try{for(;;){const r=one('SELECT * FROM outbox ORDER BY id LIMIT 1');if(!r)break;try{await tg(r.method,JSON.parse(r.payload));run('DELETE FROM outbox WHERE id=?',r.id);}catch(e){lastError=e.code||'network';console.warn('Delivery',r.method,'failed:',lastError);if([400,403].includes(e.code)){if(r.method==='sendPhoto'){const p=JSON.parse(r.payload);enqueue('sendMessage',{chat_id:p.chat_id,text:'GLORY ARENA\n'+p.caption,reply_markup:p.reply_markup});}run('DELETE FROM outbox WHERE id=?',r.id);continue;}await sleep(e.code===429?Math.max(0,blockedUntil-Date.now()):60000);break;}}}finally{busy=false;}}
 function validSecret(req){const a=Buffer.from(String(req.headers['x-telegram-bot-api-secret-token']||''));const b=Buffer.from(secret);return a.length===b.length&&timingSafeEqual(a,b);}
 const server=http.createServer(async(req,res)=>{
 if(req.method==='GET'&&req.url.split('?')[0]==='/health'){res.writeHead(200,{'content-type':'application/json'});res.end(JSON.stringify({status:'ok',transport:'webhook',webhook_registered:webhookReady,last_error:lastError}));return;}
