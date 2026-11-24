@@ -119,6 +119,7 @@ const cid=m.chat.id,t=(m.text||'').split(/\s+/)[0].split('@')[0],full=m.text||''
 if(['/start','/help'].includes(t)||full==='🏠 메인 메뉴'){if(m.chat.type!=='private'&&roomService.isGeneratedChat(cid)){send(cid,'⚜️ 이 그룹은 GLORY ARENA 전용 대전방입니다. 경기 진행 안내는 위 공지에서 확인해 주세요.');return;}menu(cid);return;}
 if(full==='📖 이용 안내'){matchFlow.tutorial(cid);return;}
 if(m.chat.type==='private'&&matchFlow.onText(m.from.id,full))return;
+if(m.chat.type!=='private'&&['/end','/stop','/close'].includes(t)){matchFlow.stopByChat(m.from.id,cid);return;}
 if(m.chat.type!=='private'&&!m.dice&&gameEmoji(full)){const active=one("SELECT * FROM matches WHERE chat=? AND state='active' ORDER BY id DESC LIMIT 1",cid);if(active&&active.turn===m.from.id){send(cid,'⚠️ '+gameEmoji(full)+'가 일반 텍스트로 전송되어 점수가 기록되지 않았습니다.\n공식 게임 애니메이션으로 전송해야 합니다.\n\n'+gameInstructions(active.game));}return;}
 if(m.chat.type!=='private'&&['/play','/game','/roll'].includes(t)){const active=one("SELECT * FROM matches WHERE chat=? AND state='active' ORDER BY id DESC LIMIT 1",cid);if(active)send(cid,'🔴 현재 차례: '+matchBoard.player(active.turn)+'\n\n'+gameInstructions(active.game));return;}
 if(t==='/create'||t==='/lobby'||['⚔ 매치 개설','🏛 매치 대기실'].includes(full)){if(m.chat.type==='private'){if(t==='/create'||full==='⚔ 매치 개설')matchFlow.begin(m.from.id);else matchFlow.lobby(m.from.id);return;}if(t==='/create'||full==='⚔ 매치 개설')choose(cid);else lobby(cid);return;}
@@ -169,6 +170,7 @@ const q=new URLSearchParams(raw),provided=q.get('csrf')||'';
 if(!/^[a-f0-9]{64}$/.test(provided)||!timingSafeEqual(Buffer.from(provided),Buffer.from(csrf))){res.writeHead(403).end();return true;}
 const act=q.get('action'),id=Number(q.get('id')),value=q.get('value')||'';let changed=false;
 if(act==='mr_cancel'&&/^GA-[A-F0-9]{8}$/.test(String(q.get('code')||''))){const done=matchFlow.cancelForAdmin(q.get('code'));res.writeHead(303,{location:'/admin?tab=requests&saved='+Number(done)}).end();void drain();return true;}
+if(act==='mr_force'&&/^GA-[A-F0-9]{8}$/.test(String(q.get('code')||''))){const code=q.get('code');const done=matchFlow.forceCloseForAdmin(code);if(done)run('INSERT INTO admin_audit(at,action,target) VALUES(?,?,?)',Date.now(),'force_match_close',code);res.writeHead(303,{location:'/admin?tab=requests&saved='+Number(done)}).end();void drain();return true;}
 if(['tg_send','tg_code','tg_password','tg_session','tg_verify','tg_logout','tg_cancel'].includes(act)){
 let result='ok';try{
 if(act==='tg_send')await telegramAuth.start((q.get('phone')||'').trim());
@@ -247,7 +249,7 @@ content+='<section><h2>자동 생성 대전방</h2><p>등록된 사용자 계정
 }
 if(tab==='requests'){
 const rows=all('SELECT * FROM match_requests ORDER BY created DESC LIMIT 50 OFFSET ?',offset);
-content='<section><h2>대전 신청 현황</h2><p>상대 확인, 신청 수락, 그룹 생성, 양측 준비 상태를 확인할 수 있습니다. 기존 경기 데이터는 보존됩니다.</p>'+table(['코드','생성자','상대방','종목','방식','상태','공지 A/B','준비 A/B','관리'],rows.map(r=>tr([r.code,r.owner,r.guest||'-',r.game+' · '+r.rounds+'판',modes[r.mode],r.status,r.notice_owner+'/'+r.notice_guest,r.ready_owner+'/'+r.ready_guest],'<td>'+(!['finished','cancelled','expired'].includes(r.status)?form('mr_cancel','', '<input type="hidden" name="code" value="'+esc(r.code)+'">','중단'):'-')+'</td>')))+paging()+'</section>'+
+content='<section><h2>대전 신청 현황</h2><p>상대 확인, 신청 수락, 그룹 생성, 양측 준비 상태를 확인할 수 있습니다. 강제 방 종료는 진행 중인 경기를 중단하고 비공개 그룹 삭제를 요청합니다. 기존 종료 경기 전적은 보존됩니다.</p>'+table(['코드','생성자','상대방','종목','방식','상태','공지 A/B','준비 A/B','관리'],rows.map(r=>tr([r.code,r.owner,r.guest||'-',r.game+' · '+r.rounds+'판',modes[r.mode],r.status,r.notice_owner+'/'+r.notice_guest,r.ready_owner+'/'+r.ready_guest],'<td>'+(r.room_code&&['room_ready','playing','finished','cancelled'].includes(r.status)?form('mr_force','', '<input type="hidden" name="code" value="'+esc(r.code)+'">','강제 방 종료'):!['finished','cancelled','expired'].includes(r.status)?form('mr_cancel','', '<input type="hidden" name="code" value="'+esc(r.code)+'">','신청 취소'):'-')+'</td>')))+paging()+'</section>'+
 '<section><h2>대전 자동 진행 설정</h2><p>신청 수락 대기 시간(5~120분)</p>'+form('flow_minutes','', '<input type="number" name="value" min="5" max="120" value="'+esc(matchFlow.config('request_minutes','60'))+'">','저장')+'</section>'+
 '<section><h2>이용 안내 문구</h2>'+form('flow_guide','', '<textarea name="value" rows="9" maxlength="1800" required>'+esc(matchFlow.config('text_guide','📖 GLORY ARENA 이용 안내\n1. 상대를 지정하거나 대기실에서 신청\n2. 상대방 수락\n3. 전용 비공개 그룹 생성\n4. 양측 준비 완료\n5. 공식 이모지 게임으로 대전\n모든 대전은 무료입니다.'))+'</textarea>','문구 저장')+'</section>'+
 '<section><h2>전용 그룹 공지 문구</h2>'+form('flow_room_notice','', '<textarea name="value" rows="9" maxlength="1800" required>'+esc(matchFlow.config('text_room_notice','📌 GLORY ARENA 경기 안내\n\n두 참가자 모두 공지를 확인하고 준비 완료를 눌러주세요.\n모든 대전은 무료입니다.'))+'</textarea>','문구 저장')+'</section>';
