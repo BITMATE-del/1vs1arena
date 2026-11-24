@@ -6,6 +6,7 @@ import { createMatchFlow } from './match-flow.mjs';
 import { createMatchBoard } from './match-board.mjs';
 import { gameEmoji, validDiceMessage, gameInstructions } from './game-emojis.mjs';
 import { createSpecialDiceEngine, isSpecialMode, SPECIAL_MODES } from './special-rules.mjs';
+import { createMatchWatch } from './match-watch.mjs';
 import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
@@ -85,7 +86,7 @@ for(const m of rows)send(chat,'#'+m.id+' '+m.game+' '+games[m.game]?.[0]+' | '+m
 }
 function action(chat,user,id,op){const m=one('SELECT * FROM matches WHERE id=? AND chat=?',id,chat);if(!m){send(chat,'존재하지 않는 경기입니다.');return;}
 if(op==='join'&&m.state==='waiting'&&user!==m.owner){run("UPDATE matches SET guest=?,state='requested' WHERE id=?",user,id);send(chat,'신청 완료. 개설자 수락 대기 중입니다.',[[button('수락','accept:'+id),button('거절','reject:'+id)]]);return;}
-if(op==='accept'&&m.state==='requested'&&user===m.owner){if(one("SELECT 1 FROM matches WHERE chat=? AND state='active' AND (owner IN (?,?) OR guest IN (?,?))",chat,user,m.guest,user,m.guest)){send(chat,'참가자가 다른 경기 진행 중입니다.');return;}run("UPDATE matches SET state='active',turn=owner WHERE id=?",id);matchBoard.queueMatch(id);return;}
+if(op==='accept'&&m.state==='requested'&&user===m.owner){if(one("SELECT 1 FROM matches WHERE chat=? AND state='active' AND (owner IN (?,?) OR guest IN (?,?))",chat,user,m.guest,user,m.guest)){send(chat,'참가자가 다른 경기 진행 중입니다.');return;}run("UPDATE matches SET state='active',turn=owner WHERE id=?",id);matchWatch.arm(id);matchBoard.queueMatch(id);return;}
 if(op==='reject'&&m.state==='requested'&&user===m.owner){run("UPDATE matches SET guest=NULL,state='waiting' WHERE id=?",id);send(chat,'신청 거절. 다시 대기 중입니다.');return;}
 if(op==='cancel'&&['waiting','requested'].includes(m.state)&&user===m.owner){run("UPDATE matches SET state='cancelled' WHERE id=?",id);send(chat,'매치 취소 완료.');return;}send(chat,'현재 상태 또는 권한으로 실행할 수 없습니다.');}
 function roll(m){const {chat,from,dice,message_id}=m;const user=from.id,cid=chat.id,g=gameEmoji(dice?.emoji),v=dice?.value;
@@ -96,16 +97,16 @@ if(!validDiceMessage(dice,row.game)){send(cid,'⚠️ 현재 경기는 '+row.gam
 const id=row.id,r=row.round;
 if(isSpecialMode(row.mode)){
   const result=specialDice.accept(row,{chat:cid,user,value:v,message:message_id});
-  if(result.accepted){matchBoard.queueMatch(id);if(result.done)matchFlow.finished(cid);}
+  if(result.accepted){matchWatch.touch(id);matchBoard.queueMatch(id);if(result.done)matchFlow.finished(cid);}
   return;
 }
 run('INSERT INTO rolls VALUES(?,?,?,?,?,?)',cid,message_id,id,r,user,v);
-if(user===row.owner){run('UPDATE matches SET turn=guest WHERE id=?',id);matchBoard.queueMatch(id);return;}
+if(user===row.owner){run('UPDATE matches SET turn=guest WHERE id=?',id);matchWatch.touch(id);matchBoard.queueMatch(id);return;}
 const av=one('SELECT value FROM rolls WHERE match=? AND round=? AND player=?',id,r,row.owner).value;
 let a=row.a,b=row.b;if(row.mode==='total'){a+=av;b+=v;}else{a+=Number(av>v);b+=Number(v>av);}
 const done=r>=row.rounds||(row.mode==='wins'&&Math.max(a,b)>=Math.floor(row.rounds/2)+1);
 run('UPDATE matches SET a=?,b=?,state=?,round=?,turn=? WHERE id=?',a,b,done?'finished':'active',done?r:r+1,done?null:row.owner,id);
-matchBoard.queueMatch(id);if(done)matchFlow.finished(cid);}
+matchWatch.touch(id);matchBoard.queueMatch(id);if(done)matchFlow.finished(cid);}
 function handle(u){track(u);const actor=u.callback_query?.from||u.message?.from;const chat=u.callback_query?.message?.chat||u.message?.chat;if(actor&&blocked(actor.id)){if(u.callback_query)enqueue('answerCallbackQuery',{callback_query_id:u.callback_query.id,text:'이용이 제한된 계정입니다.',show_alert:true});else if(chat?.type==='private')send(chat.id,'이용이 제한된 계정입니다.');return;}if(chat&&roomDisabled(chat.id)&&chat.type!=='private')return;const q=u.callback_query;
 if(q){const chat=q.message?.chat;if(!chat||!q.from||typeof q.data!=='string')return;const cid=chat.id,user=q.from.id,p=q.data.split(':');
 enqueue('answerCallbackQuery',{callback_query_id:q.id});
@@ -127,11 +128,13 @@ const cid=m.chat.id,t=(m.text||'').split(/\s+/)[0].split('@')[0],full=m.text||''
 if(['/start','/help'].includes(t)||full==='🏠 메인 메뉴'){if(m.chat.type!=='private'&&roomService.isGeneratedChat(cid)){send(cid,'⚜️ 이 그룹은 GLORY ARENA 전용 대전방입니다. 경기 진행 안내는 위 공지에서 확인해 주세요.');return;}menu(cid);return;}
 if(full==='📖 이용 안내'){matchFlow.tutorial(cid);return;}
 if(m.chat.type==='private'&&matchFlow.onText(m.from.id,full))return;
+if(m.chat.type!=='private'&&['/resume','/status'].includes(t)){const current=one("SELECT id FROM matches WHERE chat=? AND state='active' ORDER BY id DESC LIMIT 1",cid);if(current)matchBoard.queueMatch(current.id);else send(cid,'현재 진행 중인 경기가 없습니다.');void drain();return;}
 if(m.chat.type!=='private'&&['/end','/stop','/close'].includes(t)){matchFlow.stopByChat(m.from.id,cid);return;}
 if(m.chat.type!=='private'&&!m.dice&&gameEmoji(full)){const active=one("SELECT * FROM matches WHERE chat=? AND state='active' ORDER BY id DESC LIMIT 1",cid);if(active&&active.turn===m.from.id){send(cid,'⚠️ '+gameEmoji(full)+'가 일반 텍스트로 전송되어 점수가 기록되지 않았습니다.\n공식 게임 애니메이션으로 전송해야 합니다.\n\n'+gameInstructions(active.game));}return;}
 if(m.chat.type!=='private'&&['/play','/game','/roll'].includes(t)){const active=one("SELECT * FROM matches WHERE chat=? AND state='active' ORDER BY id DESC LIMIT 1",cid);if(active)send(cid,'🔴 현재 차례: '+matchBoard.player(active.turn)+'\n\n'+gameInstructions(active.game));return;}
 if(t==='/create'||t==='/lobby'||['⚔ 매치 개설','🏛 매치 대기실'].includes(full)){if(m.chat.type==='private'){if(t==='/create'||full==='⚔ 매치 개설')matchFlow.begin(m.from.id);else matchFlow.lobby(m.from.id);return;}if(t==='/create'||full==='⚔ 매치 개설')choose(cid);else lobby(cid);return;}
 if(m.new_chat_members?.some(x=>x.id===botId)){if(!roomService.isGeneratedChat(cid))menu(cid);return;}
+if(m.chat.type!=='private'&&m.new_chat_members?.some(x=>!x.is_bot)){const current=one("SELECT * FROM matches WHERE chat=? AND state='active' ORDER BY id DESC LIMIT 1",cid);if(current){send(cid,'👋 대전방 입장을 확인했습니다.\n현재 차례: '+matchBoard.player(current.turn)+'\n상단 고정 경기판에서 진행 상황을 확인해 주세요.');matchBoard.queueMatch(current.id);}return;}
 if(m.chat.type!=='private'&&m.dice&&!m.forward_origin&&!m.forward_date&&!m.via_bot&&!m.sender_chat&&!m.from.is_bot)roll(m);
 }
 let webhookReady=false,blockedUntil=Date.now(),lastError=null,busy=false;
@@ -150,7 +153,10 @@ const adminPassword=process.env.ADMIN_PASSWORD||'';
 const telegramAuth=createTelegramAuth(db,secret,adminPassword);
 const roomService=createRoomService(db,telegramAuth,username,send);
 const matchBoard=createMatchBoard(db,enqueue);
-const matchFlow=createMatchFlow(db,send,roomService,games,modes,rounds,{gameEnabled,onMatchStart:id=>matchBoard.queueMatch(id),onMatchStopped:id=>matchBoard.queueMatch(id)});
+let matchFlow;
+const matchWatch=createMatchWatch(db,send,{getConfig:(k)=>setting(k,''),onTimeout:(id)=>matchFlow?.timeoutMatch(id)});
+matchFlow=createMatchFlow(db,send,roomService,games,modes,rounds,{gameEnabled,onMatchStart:id=>{matchWatch.arm(id);matchBoard.queueMatch(id);},onMatchStopped:id=>{matchWatch.touch(id);matchBoard.queueMatch(id);}});
+matchWatch.sync();
 const adminAttempts=new Map();
 const adminGlobalAttempts={count:0,until:0};
 const escapeHtml=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -279,4 +285,4 @@ webhookReady=true;console.log('Webhook update accepted',u.update_id);res.writeHe
 }catch(e){console.error('Webhook processing failed',e.name);res.writeHead(500).end();}
 });
 server.listen(port,'0.0.0.0',()=>{console.log('GLORY ARENA HTTP server listening on',port);void register();});
-setInterval(()=>{void drain();void roomService.work();roomService.recover();matchFlow.tick();},5000).unref();
+setInterval(()=>{void drain();void roomService.work();roomService.recover();matchFlow.tick();matchWatch.sync();matchWatch.tick();},5000).unref();
