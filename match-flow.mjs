@@ -56,7 +56,7 @@ export function createMatchFlow(db, send, roomService, games, modes, rounds, opt
     const column=user===r.owner?'ready_owner':'ready_guest';
     run('UPDATE match_requests SET '+column+'=1,updated=? WHERE code=?',Date.now(),code);
     const current=get(code);
-    if(current.ready_owner&&current.ready_guest){run("UPDATE match_requests SET status='playing',updated=? WHERE code=?",Date.now(),code);run("UPDATE matches SET state='active',turn=owner WHERE id=? AND state='waiting'",current.match_id);const room=roomService.getByCode(current.room_code);if(room?.chat)send(room.chat,'⚔️ 양측 준비 완료!\n\n'+code+' · '+r.game+' '+modes[r.mode]+' '+r.rounds+'판\n\n'+name(r.owner)+' 님부터 공식 '+r.game+' 이모지를 전송해 주세요.');}
+    if(current.ready_owner&&current.ready_guest){run("UPDATE match_requests SET status='playing',updated=? WHERE code=?",Date.now(),code);run("UPDATE matches SET state='active',turn=owner WHERE id=? AND state='waiting'",current.match_id);const room=roomService.getByCode(current.room_code);if(room?.chat)send(room.chat,'⚔️ 양측 준비 완료!\n\n'+code+' · '+r.game+' '+modes[r.mode]+' '+r.rounds+'판\n\n'+name(r.owner)+' 님 차례입니다. 아래 게임 버튼을 누르면 텔레그램 공식 결과가 자동으로 기록됩니다.',[[btn(r.game+' '+(games[r.game]?.[0]||'게임')+' 굴리기','dice:'+current.match_id)]]);}
     else send(chat,'✅ '+name(user)+' 님 준비 완료. 상대방 준비를 기다리고 있습니다.');
   }
   function onCallback(user,chat,p){if(p[0]!=='mf')return false;const op=p[1],code=p[2],r=code?get(code):null;
