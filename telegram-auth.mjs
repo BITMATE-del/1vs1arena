@@ -10,15 +10,16 @@ export function createTelegramAuth(db, secret, adminPassword) {
   db.exec("CREATE TABLE IF NOT EXISTS telegram_account_session(id INTEGER PRIMARY KEY CHECK(id=1), encrypted TEXT NOT NULL, user_id TEXT NOT NULL, name TEXT NOT NULL, username TEXT NOT NULL, saved_at INTEGER NOT NULL)");
   let pending=null;
   let lastError='';
+  let lastSent=0;
   function seal(raw){const iv=randomBytes(12), cipher=createCipheriv('aes-256-gcm',key,iv);const data=Buffer.concat([cipher.update(raw,'utf8'),cipher.final()]);return Buffer.concat([iv,cipher.getAuthTag(),data]).toString('base64');}
   function unseal(raw){const bytes=Buffer.from(raw,'base64');if(bytes.length<30)throw Error('Session invalid');const decipher=createDecipheriv('aes-256-gcm',key,bytes.subarray(0,12));decipher.setAuthTag(bytes.subarray(12,28));return Buffer.concat([decipher.update(bytes.subarray(28)),decipher.final()]).toString();}
   function current(){return db.prepare('SELECT * FROM telegram_account_session WHERE id=1').get();}
   function info(){const row=current();return {configured,connected:!!row,id:row?.user_id||'',name:row?.name||'',username:row?.username||'',savedAt:row?.saved_at||null,stage:pending?.stage||'',lastError};}
   async function closePending(){if(pending?.client)await pending.client.disconnect().catch(()=>{});pending=null;}
-  async function clientWith(session){const c=new TelegramClient(new StringSession(session),apiId,apiHash,{connectionRetries:2,requestRetries:1,autoReconnect:false});c.setLogLevel('none');await c.connect();return c;}
+  async function clientWith(session){const c=new TelegramClient(new StringSession(session),apiId,apiHash,{connectionRetries:5,requestRetries:5,autoReconnect:false});c.setLogLevel('none');await c.connect();return c;}
   async function persist(client){if(!(await client.checkAuthorization()))throw Error('UNAUTHORIZED');const me=await client.getMe();if(!me||me.bot)throw Error('USER_REQUIRED');const session=client.session.save();if(!session||session.length>20000)throw Error('SESSION_INVALID');const name=[me.firstName,me.lastName].filter(Boolean).join(' ').slice(0,100), username=String(me.username||'').slice(0,100);
   db.prepare('INSERT INTO telegram_account_session(id,encrypted,user_id,name,username,saved_at) VALUES(1,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET encrypted=excluded.encrypted,user_id=excluded.user_id,name=excluded.name,username=excluded.username,saved_at=excluded.saved_at').run(seal(session),String(me.id),name,username,Date.now());lastError='';return info();}
-  async function start(phone){if(!configured)throw Error('API_MISSING');phone=String(phone).replace(/[\s()-]/g,'');if(/^010\d{8}$/.test(phone))phone='+82'+phone.slice(1);else if(/^82\d{9,10}$/.test(phone))phone='+'+phone;if(!/^\+[1-9]\d{7,14}$/.test(phone))throw Error('PHONE_INVALID');await closePending();const client=await clientWith('');try{const result=await client.sendCode(creds,phone);pending={client,phone,hash:result.phoneCodeHash,stage:'code',expires:Date.now()+5*60*1000,tries:0};lastError='';return info();}catch(e){await client.disconnect().catch(()=>{});throw e;}}
+  async function start(phone){if(!configured)throw Error('API_MISSING');phone=String(phone).replace(/[\s()-]/g,'');if(/^010\d{8}$/.test(phone))phone='+82'+phone.slice(1);else if(/^82\d{9,10}$/.test(phone))phone='+'+phone;if(!/^\+[1-9]\d{7,14}$/.test(phone))throw Error('PHONE_INVALID');if(Date.now()-lastSent<15000)throw Error('REQUEST_COOLDOWN');lastSent=Date.now();await closePending();let client;try{client=await clientWith('');const result=await client.sendCode(creds,phone);pending={client,phone,hash:result.phoneCodeHash,stage:'code',expires:Date.now()+5*60*1000,tries:0};lastError='';return info();}catch(e){if(client)await client.disconnect().catch(()=>{});throw e;}}
   function active(stage){if(!pending||pending.stage!==stage||Date.now()>pending.expires)throw Error('LOGIN_EXPIRED');if(++pending.tries>5)throw Error('TOO_MANY_ATTEMPTS');return pending;}
   async function code(value){if(!/^\d{4,8}$/.test(value))throw Error('CODE_INVALID');const p=active('code');try{await p.client.invoke(new Api.auth.SignIn({phoneNumber:p.phone,phoneCodeHash:p.hash,phoneCode:value}));await persist(p.client);await closePending();return info();}catch(e){if(String(e.errorMessage||e.message||'').includes('SESSION_PASSWORD_NEEDED')){p.stage='password';p.tries=0;return info();}throw e;}}
   async function password(value){if(!value||value.length>256)throw Error('PASSWORD_INVALID');const p=active('password');await p.client.signInWithPassword(creds,{password:async()=>value,onError:async e=>{throw e;}});await persist(p.client);await closePending();return info();}
@@ -35,9 +36,9 @@ export function createTelegramAuth(db, secret, adminPassword) {
       'API_MISSING','API_ID_INVALID','API_ID_PUBLISHED_FLOOD','AUTH_RESTART',
       'SESSION_INVALID','USER_REQUIRED','UNAUTHORIZED','NOT_CONNECTED',
       'TOO_MANY_ATTEMPTS','PASSWORD_INVALID','CODE_INVALID',
-      'PHONE_PASSWORD_FLOOD','SEND_CODE_UNAVAILABLE'
+      'PHONE_PASSWORD_FLOOD','SEND_CODE_UNAVAILABLE','REQUEST_COOLDOWN'
     ];
-    const kind=codes.find(x=>msg.includes(x))||
+    const kind=(msg.includes('Request was unsuccessful')?'RETRY_EXHAUSTED':codes.find(x=>msg.includes(x)))||
       (/FLOOD_WAIT/i.test(msg)?'FLOOD_WAIT':
       /timeout|timed out|ECONN|ETIMEDOUT|ENETUNREACH|connection/i.test(msg)?'NETWORK_ERROR':
       /Invalid api|api hash|API hash|must be.*api/i.test(msg)?'API_ID_INVALID':
