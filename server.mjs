@@ -1,6 +1,7 @@
 import http from 'node:http';
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { createTelegramAuth } from './telegram-auth.mjs';
+import { createRoomService } from './rooms.mjs';
 import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
@@ -91,7 +92,7 @@ enqueue('answerCallbackQuery',{callback_query_id:q.id});
 if(p[0]==='menu'){menu(cid);return;}
 if(p[0]==='stats'){stats(cid,user);return;}
 if(p[0]==='guide'){guide(cid);return;}
-if(chat.type==='private'){groupLink(cid);return;}
+if(chat.type==='private'){if(p[0]==='choose'){roomService.request(user);return;}groupLink(cid);return;}
 if(p[0]==='lobby'){lobby(cid);return;}
 if(p[0]==='choose'){choose(cid);return;}
 if(p[0]==='game'&&Object.hasOwn(games,p[1])){send(cid,'경기 방식 선택',Object.entries(modes).map(([k,t])=>[button(t,'mode:'+p[1]+':'+k)]));return;}
@@ -120,6 +121,7 @@ function validSecret(req){const a=Buffer.from(String(req.headers['x-telegram-bot
 
 const adminPassword=process.env.ADMIN_PASSWORD||'';
 const telegramAuth=createTelegramAuth(db,secret,adminPassword);
+const roomService=createRoomService(db,telegramAuth,username,send);
 const adminAttempts=new Map();
 const adminGlobalAttempts={count:0,until:0};
 const escapeHtml=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -217,7 +219,7 @@ if(!a.connected)content+='<section><h2>전화번호로 로그인</h2><p>본인�
 a.stage==='password'?sendForm('tg_password',field('password','2단계 비밀번호','password'),'계정 연결'):
 sendForm('tg_send',field('phone','국가번호 포함 전화번호','tel','+821012345678'),'인증번호 받기'))+
 (a.stage?sendForm('tg_cancel','','인증 취소'):'')+'</section><section><h2>기존 세션 등록</h2><p>운영자 본인이 생성한 GramJS StringSession만 등록하세요. 등록되면 암호화하여 서버 DB에 저장합니다.</p>'+sendForm('tg_session','<label>StringSession<textarea name="session" maxlength="20000" rows="3" required autocomplete="off" placeholder="1..."></textarea></label>','세션 연결')+'</section>';
-content+='<section><h2>대전방 생성 상태</h2><p>계정 연결 기능과 그룹 자동 생성 기능은 별도입니다. 자동 그룹 생성 엔진은 아직 연결되지 않았습니다.</p></section>';
+content+='<section><h2>자동 생성 대전방</h2><p>등록된 사용자 계정으로 신규 비공개 그룹 생성 및 기존 봇 관리자 등록을 요청합니다.</p>'+table(['코드','생성자','그룹 ID','상태','오류'],all('SELECT * FROM generated_rooms ORDER BY created DESC LIMIT 30').map(r=>tr([r.code,r.owner,r.chat||'-',r.status,r.error||'-'])))+'</section>';
 }
 if(tab==='audit'){const rows=all('SELECT * FROM admin_audit ORDER BY id DESC LIMIT 50 OFFSET ?',offset);const names={block:'회원 제한',unblock:'회원 제한 해제',note:'회원 메모',room_enable:'방 활성화',room_disable:'방 중단',cancel:'대기 경기 취소',game:'게임 설정',matches_enabled:'신규 매치 설정',welcome_caption:'시작 문구 수정'};content='<section><h2>관리자 변경 기록</h2>'+table(['시간','작업','대상'],rows.map(r=>tr([date(r.at),names[r.action]||r.action,r.target])))+paging()+'</section>';}
 const nav=Object.entries(sections).map(([k,v])=>'<a class="'+(k===tab?'selected':'')+'" href="/admin?tab='+k+'">'+v+'</a>').join('');
@@ -236,4 +238,4 @@ webhookReady=true;console.log('Webhook update accepted',u.update_id);res.writeHe
 }catch(e){console.error('Webhook processing failed',e.name);res.writeHead(500).end();}
 });
 server.listen(port,'0.0.0.0',()=>{console.log('GLORY ARENA HTTP server listening on',port);void register();});
-setInterval(()=>void drain(),5000).unref();
+setInterval(()=>{void drain();void roomService.work();},5000).unref();
