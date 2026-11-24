@@ -40,16 +40,12 @@ function blocked(id){return !!one('SELECT blocked FROM arena_users WHERE id=?',i
 function roomDisabled(id){return one('SELECT enabled FROM arena_rooms WHERE id=?',id)?.enabled===0;}
 function gameEnabled(g){return setting('game:'+g,'1')==='1';}
 
-db.exec("CREATE TABLE IF NOT EXISTS dice_button_pending(match INTEGER PRIMARY KEY, player INTEGER NOT NULL, round INTEGER NOT NULL, requested INTEGER NOT NULL)");
-function turnButton(m){const id=m.turn===m.owner?m.owner:m.guest;const u=one('SELECT name,username FROM arena_users WHERE id=?',id);const label=u?.username?'@'+u.username:(u?.name||'참가자').slice(0,24);return [[button(m.game+' '+label.slice(0,22)+' 굴리기','dice:'+m.id)]];}
-function queueDiceButton(chat,user,id){
+function playerDiceHelp(chat,user,id){
 const m=one("SELECT * FROM matches WHERE id=? AND chat=? AND state='active'",id,chat);
-if(!m){return;}
-if(m.turn!==user){return;}
-const inserted=run('INSERT OR IGNORE INTO dice_button_pending(match,player,round,requested) VALUES(?,?,?,?)',m.id,user,m.round,Date.now());
-if(!inserted.changes){return;}
-enqueue('sendDice',{chat_id:chat,emoji:m.game,_arena_match:m.id,_arena_actor:user,_arena_round:m.round});
-void drain();
+if(!m)return;
+const current=matchBoard.player(m.turn);
+if(m.turn!==user){send(chat,'현재 차례는 '+current+' 님입니다. 본인 차례에만 게임을 전송할 수 있습니다.');return;}
+send(chat,'🎮 '+current+' 님 차례입니다.\\n게임은 봇이 대신 굴리지 않습니다.\\n채팅창의 '+m.game+' 버튼을 누르거나, 텔레그램 이모지 선택기에서 '+m.game+' 하나를 직접 보내세요.\\n공식 애니메이션 게임 결과만 인정됩니다.');
 }
 function enqueue(method,payload){run('INSERT INTO outbox(method,payload) VALUES(?,?)',method,JSON.stringify(payload));}
 function send(chat,text,buttons){enqueue('sendMessage',{chat_id:chat,text,...(buttons?{reply_markup:{inline_keyboard:buttons}}:{})});}
@@ -92,7 +88,7 @@ if(op==='cancel'&&['waiting','requested'].includes(m.state)&&user===m.owner){run
 function roll(m){const {chat,from,dice,message_id}=m;const user=from.id,cid=chat.id,g=dice.emoji,v=dice.value;
 if(!games[g]||!Number.isInteger(v)||v<1||v>games[g][1]||one('SELECT 1 FROM rolls WHERE chat=? AND message=?',cid,message_id))return;
 const row=one("SELECT * FROM matches WHERE chat=? AND state='active' AND turn=? AND game=?",cid,user,g);if(!row)return;
-const id=row.id,r=row.round;run('INSERT INTO rolls VALUES(?,?,?,?,?,?)',cid,message_id,id,r,user,v);run('DELETE FROM dice_button_pending WHERE match=?',id);
+const id=row.id,r=row.round;run('INSERT INTO rolls VALUES(?,?,?,?,?,?)',cid,message_id,id,r,user,v);
 if(user===row.owner){run('UPDATE matches SET turn=guest WHERE id=?',id);matchBoard.queueMatch(id);return;}
 const av=one('SELECT value FROM rolls WHERE match=? AND round=? AND player=?',id,r,row.owner).value;
 let a=row.a,b=row.b;if(row.mode==='total'){a+=av;b+=v;}else{a+=Number(av>v);b+=Number(v>av);}
@@ -103,7 +99,7 @@ function handle(u){track(u);const actor=u.callback_query?.from||u.message?.from;
 if(q){const chat=q.message?.chat;if(!chat||!q.from||typeof q.data!=='string')return;const cid=chat.id,user=q.from.id,p=q.data.split(':');
 enqueue('answerCallbackQuery',{callback_query_id:q.id});
 if(p[0]==='mf'&&matchFlow.onCallback(user,cid,p))return;
-if(p[0]==='dice'&&/^\d+$/.test(p[1]||'')){queueDiceButton(cid,user,Number(p[1]));return;}
+if(p[0]==='dice'&&/^\d+$/.test(p[1]||'')){playerDiceHelp(cid,user,Number(p[1]));return;}
 if(p[0]==='menu'){menu(cid);return;}
 if(p[0]==='stats'){stats(cid,user);return;}
 if(p[0]==='guide'){guide(cid);return;}
@@ -120,6 +116,7 @@ const cid=m.chat.id,t=(m.text||'').split(/\s+/)[0].split('@')[0],full=m.text||''
 if(['/start','/help'].includes(t)||full==='🏠 메인 메뉴'){if(m.chat.type!=='private'&&roomService.isGeneratedChat(cid)){send(cid,'⚜️ 이 그룹은 GLORY ARENA 전용 대전방입니다. 경기 진행 안내는 위 공지에서 확인해 주세요.');return;}menu(cid);return;}
 if(full==='📖 이용 안내'){matchFlow.tutorial(cid);return;}
 if(m.chat.type==='private'&&matchFlow.onText(m.from.id,full))return;
+if(m.chat.type!=='private'&&Object.hasOwn(games,full)&&!m.dice){const active=one("SELECT * FROM matches WHERE chat=? AND state='active' ORDER BY id DESC LIMIT 1",cid);if(active&&active.turn===m.from.id&&active.game===full)send(cid,'이 메시지는 텍스트 이모지라 공식 게임 결과가 아닙니다. 텔레그램 이모지 선택기에서 '+full+' 공식 애니메이션을 직접 보내주세요.');return;}
 if(t==='/create'||t==='/lobby'||['⚔ 매치 개설','🏛 매치 대기실'].includes(full)){if(m.chat.type==='private'){if(t==='/create'||full==='⚔ 매치 개설')matchFlow.begin(m.from.id);else matchFlow.lobby(m.from.id);return;}if(t==='/create'||full==='⚔ 매치 개설')choose(cid);else lobby(cid);return;}
 if(m.new_chat_members?.some(x=>x.id===botId)){if(!roomService.isGeneratedChat(cid))menu(cid);return;}
 if(m.chat.type!=='private'&&m.dice&&!m.forward_origin&&!m.forward_date&&!m.via_bot&&!m.sender_chat&&!m.from.is_bot)roll(m);
@@ -132,7 +129,7 @@ let result;try{result=await response.json();}catch{result={};}
 if(!response.ok||!result.ok){const code=Number(result.error_code||response.status);if(code===429){const retry=Math.max(Number(result.parameters?.retry_after)||0,Number(response.headers.get('retry-after'))||0,120);blockedUntil=Date.now()+(retry+5)*1000;console.warn('Telegram',method,'HTTP 429; retry_after=',retry);}throw Object.assign(new Error('Telegram API error'),{code,description:String(result.description||'')});}
 return result.result;}
 async function register(){for(;;){if(webhookReady)return;try{await tg('setWebhook',{url:base+'/telegram/webhook',secret_token:secret,allowed_updates:['message','callback_query'],drop_pending_updates:false,max_connections:1});webhookReady=true;lastError=null;console.log('Telegram webhook registered successfully');void drain();return;}catch(e){lastError=e.code||'network';console.warn('Webhook registration failed:',lastError);await sleep(e.code===429?Math.max(0,blockedUntil-Date.now()):120000);}}}
-async function drain(){if(busy||!webhookReady)return;busy=true;try{for(;;){const r=one('SELECT * FROM outbox ORDER BY id LIMIT 1');if(!r)break;try{const p=JSON.parse(r.payload);if(r.method==='arenaBoardSync'){await matchBoard.sync(p,tg);}else if(r.method==='sendDice'&&p._arena_match){const { _arena_match:matchId,_arena_actor:actor,_arena_round:expectedRound,...dicePayload}=p;const current=one("SELECT * FROM matches WHERE id=? AND chat=? AND state='active' AND turn=?",matchId,p.chat_id,actor);if(!current||current.round!==expectedRound){run('DELETE FROM dice_button_pending WHERE match=?',matchId);run('DELETE FROM outbox WHERE id=?',r.id);continue;}const result=await tg('sendDice',dicePayload);if(!result?.dice?.emoji||!Number.isInteger(result?.dice?.value)||!Number.isSafeInteger(result.message_id))throw Error('DICE_RESPONSE_INVALID');roll({chat:{id:p.chat_id},from:{id:actor},dice:result.dice,message_id:result.message_id});}else await tg(r.method,p);run('DELETE FROM outbox WHERE id=?',r.id);}catch(e){lastError=e.code||'network';console.warn('Delivery',r.method,'failed:',lastError);if(r.method==='sendDice'&&[400,403].includes(e.code)){const p=JSON.parse(r.payload);run('DELETE FROM dice_button_pending WHERE match=?',p._arena_match);send(p.chat_id,'게임 버튼 처리에 실패했습니다. 다시 눌러주세요.');}
+async function drain(){if(busy||!webhookReady)return;busy=true;try{for(;;){const r=one('SELECT * FROM outbox ORDER BY id LIMIT 1');if(!r)break;try{const p=JSON.parse(r.payload);if(r.method==='arenaBoardSync'){await matchBoard.sync(p,tg);}else if(r.method==='sendDice'){/* Remove any leftover bot-generated game jobs from prior deployments; never throw on behalf of a player. */}else await tg(r.method,p);run('DELETE FROM outbox WHERE id=?',r.id);}catch(e){lastError=e.code||'network';console.warn('Delivery',r.method,'failed:',lastError);
 if([400,403].includes(e.code)){if(r.method==='sendPhoto'){const p=JSON.parse(r.payload);enqueue('sendMessage',{chat_id:p.chat_id,text:'GLORY ARENA\n'+p.caption,reply_markup:p.reply_markup});}run('DELETE FROM outbox WHERE id=?',r.id);continue;}await sleep(e.code===429?Math.max(0,blockedUntil-Date.now()):60000);break;}}}finally{busy=false;}}
 function validSecret(req){const a=Buffer.from(String(req.headers['x-telegram-bot-api-secret-token']||''));const b=Buffer.from(secret);return a.length===b.length&&timingSafeEqual(a,b);}
 
