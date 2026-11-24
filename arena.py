@@ -106,24 +106,41 @@ def main():
     if not TOKEN: raise SystemExit('BOT_TOKEN 환경변수를 설정하세요.')
     init(); offset=0
     logging.basicConfig(level=logging.INFO)
-    try:
-        identity=api('getMe')
-        logging.info('Telegram bot identity: @%s',identity.get('username'))
-        if identity.get('username','').lower()!='valhallabattle_bot': raise SystemExit('BOT_TOKEN does not belong to ValhallaBattle_bot')
-        info=api('getWebhookInfo')
-        if info.get('url'):
-            api('deleteWebhook',drop_pending_updates=False)
-            logging.info('Existing webhook removed for polling')
-        logging.info('Telegram polling ready')
-    except urllib.error.HTTPError as e:
-        logging.error('Telegram initialization HTTP status: %s',e.code)
-        raise SystemExit(1)
+    def retry_delay(e):
+        try:
+            payload=json.loads(e.read().decode())
+            return max(60,int(payload.get('parameters',{}).get('retry_after',60))+5)
+        except Exception:
+            return 65
+    while True:
+        try:
+            identity=api('getMe')
+            logging.info('Telegram bot identity: @%s',identity.get('username'))
+            if identity.get('username','').lower()!='valhallabattle_bot':
+                logging.error('BOT_TOKEN belongs to a different bot')
+                time.sleep(300)
+                continue
+            info=api('getWebhookInfo')
+            if info.get('url'):
+                api('deleteWebhook',drop_pending_updates=False)
+            logging.info('Telegram polling ready')
+            break
+        except urllib.error.HTTPError as e:
+            delay=retry_delay(e) if e.code==429 else 120
+            logging.warning('Telegram initialization HTTP %s; retry in %s seconds',e.code,delay)
+            time.sleep(delay)
+        except Exception as e:
+            logging.warning('Telegram initialization error: %s',type(e).__name__)
+            time.sleep(60)
     while True:
         try:
             for u in api('getUpdates',offset=offset,timeout=25,allowed_updates=['message','callback_query']):
                 try: handle(u)
                 except Exception as e: logging.error('업데이트 처리 오류: %s',type(e).__name__)
                 offset=u['update_id']+1
-        except urllib.error.HTTPError as e: logging.error('Telegram polling HTTP status: %s',e.code); time.sleep(5)
+        except urllib.error.HTTPError as e:
+            delay=retry_delay(e) if e.code==429 else 60
+            logging.warning('Telegram polling HTTP %s; retry in %s seconds',e.code,delay)
+            time.sleep(delay)
         except Exception as e: logging.error('연결 오류: %s',type(e).__name__); time.sleep(3)
 if __name__=='__main__': main()
