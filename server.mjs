@@ -78,7 +78,7 @@ async function register(){for(;;){try{await tg('setWebhook',{url:base+'/telegram
 async function drain(){if(busy||!webhookReady)return;busy=true;try{for(;;){const r=one('SELECT * FROM outbox ORDER BY id LIMIT 1');if(!r)break;try{await tg(r.method,JSON.parse(r.payload));run('DELETE FROM outbox WHERE id=?',r.id);}catch(e){lastError=e.code||'network';console.warn('Delivery',r.method,'failed:',lastError);if([400,403].includes(e.code)){run('DELETE FROM outbox WHERE id=?',r.id);continue;}await sleep(e.code===429?Math.max(0,blockedUntil-Date.now()):60000);break;}}}finally{busy=false;}}
 function validSecret(req){const a=Buffer.from(String(req.headers['x-telegram-bot-api-secret-token']||''));const b=Buffer.from(secret);return a.length===b.length&&timingSafeEqual(a,b);}
 const server=http.createServer(async(req,res)=>{
-if(req.method==='GET'&&req.url==='/health'){res.writeHead(200,{'content-type':'application/json'});res.end(JSON.stringify({status:'ok',transport:'webhook',webhook_registered:webhookReady,last_error:lastError}));return;}
+if(req.method==='GET'&&req.url.split('?')[0]==='/health'){res.writeHead(200,{'content-type':'application/json'});res.end(JSON.stringify({status:'ok',transport:'webhook',webhook_registered:webhookReady,last_error:lastError}));return;}
 if(req.method!=='POST'||req.url!=='/telegram/webhook'){res.writeHead(404).end();return;}
 if(!validSecret(req)){res.writeHead(403).end();return;}
 try{let size=0;const chunks=[];for await(const chunk of req){size+=chunk.length;if(size>1048576){res.writeHead(413).end();return;}chunks.push(chunk);}
