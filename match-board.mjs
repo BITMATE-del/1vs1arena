@@ -55,7 +55,7 @@ export function createMatchBoard(db, enqueue) {
   async function sync(payload,tg){
     const chat=payload.chat_id;
     // Match ID is an explicit version; stale queued boards cannot override a rematch.
-    const latest=one("SELECT * FROM matches WHERE chat=? AND state IN ('active','finished') ORDER BY id DESC LIMIT 1",chat);
+    const latest=one("SELECT * FROM matches WHERE chat=? AND state IN ('active','finished','cancelled') ORDER BY id DESC LIMIT 1",chat);
     if(!latest||latest.id!==payload.match_id)return;
     const view=render(latest);
     const board=one('SELECT * FROM match_boards WHERE chat=?',chat);
