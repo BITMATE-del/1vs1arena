@@ -93,6 +93,7 @@ export function createMatchFlow(db, send, roomService, games, modes, rounds, opt
     const now=Date.now(),room=r.room_code?roomService.getByCode(r.room_code):null;
     run("UPDATE match_requests SET status='cancelled',updated=? WHERE code=? AND status IN ('room_ready','playing','finished')",now,r.code);
     if(r.match_id)run("UPDATE matches SET state='cancelled',turn=NULL WHERE id=? AND state IN ('active','waiting','requested')",r.match_id);
+    if(r.match_id&&r.status==='playing')options.onMatchStopped?.(r.match_id);
     run("INSERT INTO match_continue_votes(code,deadline,close_after,state,updated) VALUES(?,?,?,'closing',?) ON CONFLICT(code) DO UPDATE SET close_after=excluded.close_after,state='closing',updated=excluded.updated,last_error=NULL",r.code,now,now+12000,now);
     const who=source==='admin'?'관리자 강제 종료': '양측 합의 종료';
     if(room?.chat)send(room.chat,'🛑 '+who+'\n\n매치 '+r.code+'의 진행이 중단되었습니다.\n약 12초 후 전용 그룹이 종료됩니다.\n완료된 이전 경기 기록은 보존됩니다.');
