@@ -44,6 +44,8 @@ assert.equal(get().status,'playing');
 const progress=messages.slice(statusStart);
 assert.equal(progress.filter(m=>m.user===1001||m.user===1002).length,0,'no duplicated private progress notifications');
 assert(progress.some(m=>m.user===-10012001200&&m.message.includes('양측 준비 완료')),'group receives match start notice');
+const startPrompt=progress.find(m=>m.user===-10012001200&&m.message.includes('양측 준비 완료'));
+assert(startPrompt.keyboard?.flat().some(b=>b.callback_data?.startsWith('dice:')),'group match start includes immediate one-tap dice action');
 const match=db.prepare('SELECT * FROM matches WHERE id=?').get(get().match_id);
 assert.equal(match.state,'active');assert.equal(match.game,'🎯');assert.equal(match.turn,1001);
 flow.finished(-10012001200);assert.equal(get().status,'finished');
