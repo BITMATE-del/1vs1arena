@@ -3,6 +3,7 @@ from contextlib import contextmanager
 GAMES={'🎲':6,'🏀':5,'⚽':5,'🎯':6,'🎳':6,'🎰':64}
 TOKEN=os.getenv('BOT_TOKEN','').strip()
 DB=os.getenv('DB_PATH','arena.db')
+BOT_ID=int(TOKEN.split(':',1)[0]) if TOKEN.split(':',1)[0].isdigit() else None
 @contextmanager
 def db():
     c=sqlite3.connect(DB, timeout=15); c.row_factory=sqlite3.Row
@@ -95,66 +96,58 @@ def handle(update):
         send(cid,'1. 그룹에 발할라 봇을 추가하세요.\n2. 매치 개설 버튼에서 게임과 조건을 선택하세요.\n3. 상대가 매치 신청하면 개설자가 수락하세요.\n4. 차례에 맞춰 해당 이모지를 단독 전송하세요.\n모든 대전은 무료입니다.'); return
     if t in ('/create','⚔ 매치 개설','/lobby','🏛 매치 대기실'):
         if chat['type']=='private':
-            api('sendMessage',chat_id=cid,text='대전은 텔레그램 그룹에서 진행합니다. 아래 버튼으로 봇을 그룹에 추가하세요.',reply_markup={'inline_keyboard':[[{'text':'그룹에 발할라 추가','url':'https://t.me/ValhallaBattle_bot?startgroup=true'}]]}); return
+            api('sendMessage',chat_id=cid,text='대전은 텔레그램 그룹에서 진행합니다. 아래 버튼으로 봇을 그룹에 추가하세요.',reply_markup={'inline_keyboard':[[{'text':'그룹에 발할라 추가','url':'https://t.me/'+os.getenv('BOT_USERNAME','ValhallaBattle_bot').strip().lstrip('@')+'?startgroup=true'}]]}); return
         if t in ('/create','⚔ 매치 개설'): choose_game(cid)
         else: lobby(cid)
         return
     if m.get('new_chat_members'):
-        if any(x.get('username','').lower()=='valhallabattle_bot' for x in m['new_chat_members']): menu(cid)
+        if any(x.get('id')==BOT_ID for x in m['new_chat_members']): menu(cid)
         return
     if chat['type']=='private': return
     if 'dice' in m and not m.get('forward_origin') and not m.get('via_bot'):
         d=m['dice']; result=roll(cid,user,m['message_id'],d['emoji'],d['value']);
         if result: send(cid,result)
+def retry_delay(e):
+    try:
+        payload=json.loads(e.read(8192).decode())
+        delay=payload.get('parameters',{}).get('retry_after',0)
+        header=e.headers.get('Retry-After','')
+        return max(120,int(delay or 0)+5,int(header)+5 if header.isdigit() else 0)
+    except Exception:
+        return 120
+
 def main():
-    if not TOKEN: raise SystemExit('BOT_TOKEN 환경변수를 설정하세요.')
-    init(); offset=0
-    logging.basicConfig(level=logging.INFO)
-    def retry_delay(e):
-        try:
-            raw=e.read(8192)
-            content_type=e.headers.get('Content-Type','').split(';')[0]
-            try:
-                payload=json.loads(raw.decode())
-                retry=payload.get('parameters',{}).get('retry_after')
-                logging.warning('Rate-limit response: Telegram JSON=%s; API error_code=%s; retry_after=%s', isinstance(payload,dict) and payload.get('ok') is False, payload.get('error_code'), retry)
-            except (ValueError, AttributeError):
-                retry=None
-                logging.warning('Rate-limit response is not Bot API JSON; content type=%s', content_type)
-            header=e.headers.get('Retry-After','')
-            header_delay=int(header) if header.isdigit() else 0
-            return max(120,int(retry or 0)+5,header_delay+5)
-        except Exception:
-            return 120
+    logging.basicConfig(level=logging.INFO,format='%(asctime)s %(levelname)s %(message)s')
+    if not TOKEN or BOT_ID is None:
+        raise SystemExit('BOT_TOKEN 형식을 확인하세요.')
+    init()
+    offset=None
+    logging.info('VALHALLA worker ready; waiting for Telegram updates')
+    # Respect the prior rate-limit cooldown before connecting after a deployment.
+    time.sleep(120)
     while True:
         try:
-            identity=api('getMe')
-            logging.info('Telegram bot identity: @%s',identity.get('username'))
-            if identity.get('username','').lower()!='valhallabattle_bot':
-                logging.error('BOT_TOKEN belongs to a different bot')
-                time.sleep(300)
-                continue
-            info=api('getWebhookInfo')
-            if info.get('url'):
-                api('deleteWebhook',drop_pending_updates=False)
-            logging.info('Telegram polling ready')
-            break
-        except urllib.error.HTTPError as e:
-            delay=retry_delay(e) if e.code==429 else 120
-            logging.warning('Telegram initialization HTTP %s; retry in %s seconds',e.code,delay)
-            time.sleep(delay)
-        except Exception as e:
-            logging.warning('Telegram initialization error: %s',type(e).__name__)
-            time.sleep(60)
-    while True:
-        try:
-            for u in api('getUpdates',offset=offset,timeout=25,allowed_updates=['message','callback_query']):
-                try: handle(u)
-                except Exception as e: logging.error('업데이트 처리 오류: %s',type(e).__name__)
+            params={'timeout':25,'allowed_updates':['message','callback_query']}
+            if offset is not None: params['offset']=offset
+            updates=api('getUpdates',**params)
+            logging.info('Telegram polling OK; updates=%d',len(updates))
+            for u in updates:
+                try:
+                    handle(u)
+                except urllib.error.HTTPError as e:
+                    if e.code==429:
+                        raise
+                    logging.error('Telegram update delivery HTTP %s; update=%s',e.code,u.get('update_id'))
+                except Exception as e:
+                    logging.error('Update handling error: %s; update=%s',type(e).__name__,u.get('update_id'))
                 offset=u['update_id']+1
         except urllib.error.HTTPError as e:
-            delay=retry_delay(e) if e.code==429 else 60
-            logging.warning('Telegram polling HTTP %s; retry in %s seconds',e.code,delay)
+            delay=retry_delay(e) if e.code==429 else 120
+            if e.code==409:
+                logging.warning('Telegram polling conflict: check existing webhook or duplicate bot worker')
+            logging.warning('Telegram HTTP %s; retry in %s seconds',e.code,delay)
             time.sleep(delay)
-        except Exception as e: logging.error('연결 오류: %s',type(e).__name__); time.sleep(3)
+        except Exception as e:
+            logging.warning('Telegram connection error: %s',type(e).__name__)
+            time.sleep(60)
 if __name__=='__main__': main()
