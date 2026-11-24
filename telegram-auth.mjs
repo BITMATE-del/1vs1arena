@@ -52,5 +52,14 @@ export function createTelegramAuth(db, secret, adminPassword) {
     console.warn('Telegram authentication error',{kind,name:safeName,code:safeCode,detail:technical});
     return kind;
   }
-  return {info,start,code,password,registerSession,verify,disconnect,cancel,error};
+  async function withClient(callback){
+    const row=current();if(!row)throw Error('NOT_CONNECTED');
+    if(!configured)throw Error('API_MISSING');
+    const client=await clientWith(unseal(row.encrypted));
+    try{
+      if(!await client.checkAuthorization())throw Error('UNAUTHORIZED');
+      return await callback(client);
+    }finally{await client.disconnect().catch(()=>{});}
+  }
+  return {info,start,code,password,registerSession,verify,disconnect,cancel,error,withClient};
 }
