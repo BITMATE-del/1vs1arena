@@ -1,3 +1,4 @@
+import { isSpecialMode, SPECIAL_MODES, baccaratHand, seotdaHand, compareHands } from './special-rules.mjs';
 import { gameInstructions, GAME_TITLES } from './game-emojis.mjs';
 export function createMatchBoard(db, enqueue) {
   db.exec("CREATE TABLE IF NOT EXISTS match_boards(chat INTEGER PRIMARY KEY,match INTEGER NOT NULL,message INTEGER,updated INTEGER NOT NULL DEFAULT 0)");
@@ -16,29 +17,50 @@ export function createMatchBoard(db, enqueue) {
     const code=matchCode(m);
     const rolls=all("SELECT round,player,value FROM rolls WHERE match=? ORDER BY round,player",m.id);
     const scoreRows=[];
+    const special=isSpecialMode(m.mode);
+    const nextThrow=(player)=>{
+      const first=rolls.find(x=>x.round===m.round&&x.player===player);
+      const second=one('SELECT value FROM special_second_rolls WHERE match=? AND round=? AND player=?',m.id,m.round,player);
+      return first?second?'2회 완료':'2번째':'1번째';
+    };
+    const mini=(player,n)=>{
+      const oneRoll=rolls.find(x=>x.round===n&&x.player===player);
+      const twoRoll=one('SELECT value FROM special_second_rolls WHERE match=? AND round=? AND player=?',m.id,n,player);
+      return [oneRoll?.value,twoRoll?.value];
+    };
     for(let n=1;n<=m.rounds;n++){
       const ar=rolls.find(x=>x.round===n&&x.player===m.owner);
       const br=rolls.find(x=>x.round===n&&x.player===m.guest);
       if(!ar&&!br)continue;
-      scoreRows.push(n+'라운드  '+(ar?.value??'–')+' : '+(br?.value??'–'));
+      if(special){
+        const da=mini(m.owner,n),db=mini(m.guest,n);
+        const fmt=x=>x.map(v=>v??'–').join('+');
+        let summary='';
+        if(da.every(x=>x!==undefined)&&db.every(x=>x!==undefined)){
+          const result=compareHands(m.mode,da,db);
+          summary=' → '+result.a.label+' / '+result.b.label;
+        }
+        scoreRows.push(n+'라운드  '+fmt(da)+' : '+fmt(db)+summary);
+      }else scoreRows.push(n+'라운드  '+(ar?.value??'–')+' : '+(br?.value??'–'));
     }
     const active=m.state==='active';
     const label=active?(m.turn===m.owner?a:b):'';
     let text='⚔️ GLORY ARENA | 실시간 경기 상태\n';
     text+='━━━━━━━━━━━━━━━━\n';
     text+='🎫 '+code+'\n';
-    text+='🎮 '+m.game+' '+(gameNames[m.game]||'공식 게임')+' · '+(modes[m.mode]||m.mode)+' · '+m.rounds+'판\n\n';
+    text+='🎮 '+m.game+' '+(gameNames[m.game]||'공식 게임')+' · '+(SPECIAL_MODES[m.mode]||modes[m.mode]||m.mode)+' · '+m.rounds+'판\n\n';
     text+='👤 A  '+a+'\n';
     text+='👤 B  '+b+'\n';
     text+='━━━━━━━━━━━━━━━━\n';
-    text+='📊 현재 점수\n';
+    text+='📊 '+(special?'라운드 승리':'현재 점수')+'\n';
     text+='A '+m.a+'  :  '+m.b+' B\n';
     if(scoreRows.length)text+='\n'+scoreRows.slice(-8).join('\n')+'\n';
     text+='\n';
     if(active){
       text+='🔴 현재 차례: '+label+'\n';
-      text+='👉 '+label+' 님이 '+m.game+' '+(GAME_TITLES[m.game]||'게임')+' 공식 애니메이션을 직접 보내주세요.\n';
+      text+='👉 '+label+' 님이 '+(special?nextThrow(m.turn)+' 🎲 다이스를':' '+m.game+' '+(GAME_TITLES[m.game]||'게임')+' 공식 애니메이션을')+' 직접 보내주세요.\n';
       text+='📍 진행 라운드 '+m.round+' / '+m.rounds;
+      if(special)text+='\n🎲 각 참가자 2회 · A1 → B1 → A2 → B2\n'+(m.mode==='baccarat'?'바카라식: 합계 일의 자리(0~9) 비교':'간이 섯다식: 1~6땡 > 알리 > 독사 > 세륙 > 끗');
     }else if(m.state==='finished'){
       text+='🏆 경기 종료\n';
       text+=m.a===m.b?'🤝 무승부':'🥇 승리: '+(m.a>m.b?a:b);
