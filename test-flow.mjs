@@ -17,8 +17,8 @@ const fakeRoom={
   reopen:code=>{const r=rooms.get(code);if(r)r.status='ready';},
   close:async code=>{const r=rooms.get(code);if(r)r.status='closed';return true;}
 };
-const matchStarts=[];
-const flow=createMatchFlow(db,send,fakeRoom,{'🎲':['다이스',6],'🎯':['다트',6]},{wins:'선승제',round:'매판 승패'},[1,3,5],{gameEnabled:()=>true,onMatchStart:id=>matchStarts.push(id)});
+const matchStarts=[],matchStops=[];
+const flow=createMatchFlow(db,send,fakeRoom,{'🎲':['다이스',6],'🎯':['다트',6]},{wins:'선승제',round:'매판 승패'},[1,3,5],{gameEnabled:()=>true,onMatchStart:id=>matchStarts.push(id),onMatchStopped:id=>matchStops.push(id)});
 const get=()=>db.prepare("SELECT * FROM match_requests ORDER BY rowid DESC LIMIT 1").get();
 function act(user,chat,parts){assert.equal(flow.onCallback(user,chat,parts),true);}
 flow.begin(1001);
@@ -98,6 +98,7 @@ act(1001,-10012001200,['mf','stopanswer',pub.code,'yes']);
 assert.equal(flow.stopFor(pub.code).state,'accepted');
 assert.equal(get().status,'cancelled');
 assert.equal(flow.votesFor(pub.code).state,'closing');
+assert.equal(matchStops.length,0,'pre-start mutual stop need not refresh an active board');
 await flow.processClose(pub.code);
 assert.equal(flow.votesFor(pub.code).state,'closed');
 assert.equal(rooms.get(pubroom).status,'closed');
