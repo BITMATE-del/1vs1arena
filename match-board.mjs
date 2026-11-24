@@ -44,7 +44,8 @@ export function createMatchBoard(db, enqueue) {
       text+=m.a===m.b?'🤝 무승부':'🥇 승리: '+(m.a>m.b?a:b);
       text+='\n추가 경기 여부를 아래 안내에서 선택하세요.';
     }else{text+='경기 상태: '+m.state;}
-    return {text,reply_markup:{inline_keyboard:[]}};
+    const canStop=active&&/^GA-[A-F0-9]{8}$/.test(code);
+    return {text,reply_markup:{inline_keyboard:canStop?[[{text:'🛑 경기 중도 종료 요청 (상호 동의)',callback_data:'mf:stop:'+code}]]:[]}};
   }
   function queue(chat){const m=one("SELECT * FROM matches WHERE chat=? AND state IN ('active','finished') ORDER BY id DESC LIMIT 1",chat);if(m)enqueue('arenaBoardSync',{chat_id:chat,match_id:m.id});}
   function queueMatch(id){const m=one('SELECT chat FROM matches WHERE id=?',id);if(m)enqueue('arenaBoardSync',{chat_id:m.chat,match_id:id});}
