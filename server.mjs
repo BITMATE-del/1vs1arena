@@ -5,7 +5,7 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 
 const token=(process.env.BOT_TOKEN||'').trim();
-const username=(process.env.BOT_USERNAME||'GloryArena_bot').trim().replace(/^@/,'');
+const username=(process.env.BOT_USERNAME||'angelsda_bot').trim().replace(/^@/,'');
 const base=(process.env.PUBLIC_URL||('https://'+(process.env.RAILWAY_PUBLIC_DOMAIN||''))).replace(/\/+$/,'');
 const port=Number(process.env.PORT||3000);
 if(!/^\d+:[\w-]+$/.test(token)) throw Error('BOT_TOKEN format invalid');
