@@ -97,6 +97,26 @@ export function createRoomService(db,telegramAuth,botUsername,send){
       throw e;
     }
   }
+  async function freshInvite(code,role){
+    if(!['owner','guest'].includes(role))throw Error('INVALID_ROLE');
+    const room=getByCode(code);
+    if(!room||!room.chat||!['ready','finished'].includes(room.status))throw Error('ROOM_NOT_READY');
+    if(!connected())throw Error('ACCOUNT_NOT_CONNECTED');
+    let link;
+    await telegramAuth.withClient(async client=>{
+      let peer;
+      if(room.access_hash){
+        peer=new Api.InputChannel({channelId:BigInt(String(room.chat).replace(/^-100/,'')),accessHash:BigInt(room.access_hash)});
+      }else{
+        await client.getDialogs({limit:100});
+        peer=await client.getInputEntity(room.chat);
+      }
+      link=await invite(client,peer,code,role);
+    });
+    const field=role==='owner'?'link':'link_guest';
+    run('UPDATE generated_rooms SET '+field+'=? WHERE code=?',link,code);
+    return link;
+  }
   // Never silently retry group creation after restart: a failed/partial operation
   // could otherwise create multiple groups for one match.
   function recover(){
@@ -104,5 +124,5 @@ export function createRoomService(db,telegramAuth,botUsername,send){
     for(const r of stale){run("UPDATE generated_rooms SET status='failed',error='INTERRUPTED' WHERE code=?",r.code);try{callbacks.get(r.code)?.onFailed?.(r.request_code);}catch{}}
   }
   function isGeneratedChat(chat){return !!one('SELECT 1 FROM generated_rooms WHERE chat=?',chat);}
-  return {request,requestPair,work,getByCode,connected,finish,reopen,close,recover,isGeneratedChat};
+  return {request,requestPair,work,getByCode,connected,finish,reopen,close,freshInvite,recover,isGeneratedChat};
 }
