@@ -7,6 +7,7 @@ import { createMatchBoard } from './match-board.mjs';
 import { gameEmoji, validDiceMessage, gameInstructions } from './game-emojis.mjs';
 import { createSpecialDiceEngine, isSpecialMode, SPECIAL_MODES } from './special-rules.mjs';
 import { createMatchWatch } from './match-watch.mjs';
+import {classicRound} from './classic-rules.mjs';
 import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
@@ -103,9 +104,8 @@ if(isSpecialMode(row.mode)){
 run('INSERT INTO rolls VALUES(?,?,?,?,?,?)',cid,message_id,id,r,user,v);
 if(user===row.owner){run('UPDATE matches SET turn=guest WHERE id=?',id);matchWatch.touch(id);matchBoard.queueMatch(id);return;}
 const av=one('SELECT value FROM rolls WHERE match=? AND round=? AND player=?',id,r,row.owner).value;
-let a=row.a,b=row.b;if(row.mode==='total'){a+=av;b+=v;}else{a+=Number(av>v);b+=Number(v>av);}
-const done=r>=row.rounds||(row.mode==='wins'&&Math.max(a,b)>=Math.floor(row.rounds/2)+1);
-run('UPDATE matches SET a=?,b=?,state=?,round=?,turn=? WHERE id=?',a,b,done?'finished':'active',done?r:r+1,done?null:row.owner,id);
+const outcome=classicRound(row,av,v),{a,b,done}=outcome;
+run('UPDATE matches SET a=?,b=?,state=?,round=?,turn=? WHERE id=?',a,b,done?'finished':'active',outcome.nextRound,outcome.nextTurn,id);
 matchWatch.touch(id);matchBoard.queueMatch(id);if(done)matchFlow.finished(cid);}
 function handle(u){track(u);const actor=u.callback_query?.from||u.message?.from;const chat=u.callback_query?.message?.chat||u.message?.chat;if(actor&&blocked(actor.id)){if(u.callback_query)enqueue('answerCallbackQuery',{callback_query_id:u.callback_query.id,text:'이용이 제한된 계정입니다.',show_alert:true});else if(chat?.type==='private')send(chat.id,'이용이 제한된 계정입니다.');return;}if(chat&&roomDisabled(chat.id)&&chat.type!=='private')return;const q=u.callback_query;
 if(q){const chat=q.message?.chat;if(!chat||!q.from||typeof q.data!=='string')return;const cid=chat.id,user=q.from.id,p=q.data.split(':');
