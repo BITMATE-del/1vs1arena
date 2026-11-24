@@ -104,11 +104,11 @@ if(['join','accept','reject','cancel'].includes(p[0])&&/^\d+$/.test(p[1]||'')){a
 const m=u.message;if(!m?.from||!['private','group','supergroup'].includes(m.chat?.type))return;
 if(setWelcome(m))return;
 const cid=m.chat.id,t=(m.text||'').split(/\s+/)[0].split('@')[0],full=m.text||'';
-if(['/start','/help'].includes(t)||full==='🏠 메인 메뉴'){menu(cid);return;}
+if(['/start','/help'].includes(t)||full==='🏠 메인 메뉴'){if(m.chat.type!=='private'&&roomService.isGeneratedChat(cid)){send(cid,'⚜️ 이 그룹은 GLORY ARENA 전용 대전방입니다. 경기 진행 안내는 위 공지에서 확인해 주세요.');return;}menu(cid);return;}
 if(full==='📖 이용 안내'){matchFlow.tutorial(cid);return;}
 if(m.chat.type==='private'&&matchFlow.onText(m.from.id,full))return;
 if(t==='/create'||t==='/lobby'||['⚔ 매치 개설','🏛 매치 대기실'].includes(full)){if(m.chat.type==='private'){if(t==='/create'||full==='⚔ 매치 개설')matchFlow.begin(m.from.id);else matchFlow.lobby(m.from.id);return;}if(t==='/create'||full==='⚔ 매치 개설')choose(cid);else lobby(cid);return;}
-if(m.new_chat_members?.some(x=>x.id===botId)){menu(cid);return;}
+if(m.new_chat_members?.some(x=>x.id===botId)){if(!roomService.isGeneratedChat(cid))menu(cid);return;}
 if(m.chat.type!=='private'&&m.dice&&!m.forward_origin&&!m.forward_date&&!m.via_bot&&!m.sender_chat&&!m.from.is_bot)roll(m);
 }
 let webhookReady=false,blockedUntil=Date.now(),lastError=null,busy=false;
