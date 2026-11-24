@@ -106,7 +106,7 @@ export function createRoomService(db,telegramAuth,botUsername,send){
     await telegramAuth.withClient(async client=>{
       let peer;
       if(room.access_hash){
-        peer=new Api.InputChannel({channelId:BigInt(String(room.chat).replace(/^-100/,'')),accessHash:BigInt(room.access_hash)});
+        peer=new Api.InputPeerChannel({channelId:BigInt(String(room.chat).replace(/^-100/,'')),accessHash:BigInt(room.access_hash)});
       }else{
         await client.getDialogs({limit:100});
         peer=await client.getInputEntity(room.chat);
