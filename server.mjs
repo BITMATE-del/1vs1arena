@@ -13,7 +13,7 @@ if(!/^\d+:[\w-]+$/.test(token)) throw Error('BOT_TOKEN format invalid');
 if(!/^https:\/\/[^/]+$/.test(base)) throw Error('PUBLIC_URL missing or invalid');
 const botId=Number(token.split(':')[0]);
 const secret=createHash('sha256').update(token+':valhalla-webhook-v1').digest('hex');
-const dbPath=process.env.DB_PATH||'arena.db';
+const dbPath=process.env.DB_PATH||'/data/arena.db';
 mkdirSync(dirname(dbPath),{recursive:true});
 const db=new DatabaseSync(dbPath);
 db.exec("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000");
