@@ -65,10 +65,16 @@ def lobby(chat):
     if not rows: send(chat,'대기 중인 매치가 없습니다. /create 로 개설하세요.'); return
     for m in rows:
         send(chat,f'#{m["id"]} {m["game"]} | {m["rounds"]}판 | '+{'wins':'선승제','total':'점수 합산','round':'매판 승패'}[m['mode']]+' | 무료 이벤트',[[button('매치 신청',f'join:{m["id"]}'),button('취소',f'cancel:{m["id"]}')]])
+def menu(chat):
+    return api('sendMessage',chat_id=chat,text='⚔ VALHALLA | 발할라\n최강자에게 허락된 전장\n아래 메뉴에서 원하는 기능을 선택하세요.\n무료 이벤트 대전',reply_markup={'keyboard':[['⚔ 매치 개설','🏛 매치 대기실'],['📖 이용 안내','🏠 메인 메뉴']],'resize_keyboard':True,'is_persistent':True})
+def choose_game(chat):
+    send(chat,'게임을 선택하세요.',[[button(g+' '+name,f'game:{g}')] for g,name in [('🎲','다이스'),('🏀','농구'),('⚽','축구'),('🎯','다트'),('🎳','볼링'),('🎰','슬롯')]]+[[button('메인 메뉴','menu')]])
 def handle(update):
     if 'callback_query' in update:
         q=update['callback_query']; chat=q['message']['chat']['id']; user=q['from']['id']; parts=q['data'].split(':')
         api('answerCallbackQuery',callback_query_id=q['id'])
+        if parts[0]=='menu': menu(chat); return
+        if q['message']['chat']['type'] not in ('group','supergroup'): send(chat,'그룹에 봇을 추가한 후 대전을 시작할 수 있습니다.'); return
         if parts[0]=='game' and len(parts)==2 and parts[1] in GAMES:
             send(chat,'경기 방식 선택',[[button(t,f'mode:{parts[1]}:{k}')] for k,t in [('wins','선승제'),('total','점수 합산'),('round','매판 승패')]]); return
         if parts[0]=='mode' and len(parts)==3:
@@ -78,11 +84,21 @@ def handle(update):
         if len(parts)==2 and parts[0] in ('join','accept','reject','cancel'):
             mid=int(parts[1]); msg=action(chat,user,mid,parts[0]); send(chat,msg,[[button('수락',f'accept:{mid}'),button('거절',f'reject:{mid}')]] if msg.startswith('신청 완료') else None); return
     m=update.get('message',{}); chat=m.get('chat',{}); user=m.get('from',{}).get('id')
-    if not user or chat.get('type') not in ('group','supergroup'): return
+    if not user or chat.get('type') not in ('group','supergroup','private'): return
     cid=chat['id']; t=m.get('text','').split('@')[0]
-    if t=='/start' or t=='/help': send(cid,'아레나 무료 대전\n/create 매치 개설\n/lobby 대기실\n공식 이모지 게임으로 대전합니다.'); return
-    if t=='/create': send(cid,'게임 선택',[[button(g,f'game:{g}') for g in GAMES]]); return
-    if t=='/lobby': lobby(cid); return
+    if t in ('/start','/help','🏠 메인 메뉴'): menu(cid); return
+    if t=='📖 이용 안내':
+        send(cid,'1. 그룹에 발할라 봇을 추가하세요.\n2. 매치 개설 버튼에서 게임과 조건을 선택하세요.\n3. 상대가 매치 신청하면 개설자가 수락하세요.\n4. 차례에 맞춰 해당 이모지를 단독 전송하세요.\n모든 대전은 무료입니다.'); return
+    if t in ('/create','⚔ 매치 개설','/lobby','🏛 매치 대기실'):
+        if chat['type']=='private':
+            api('sendMessage',chat_id=cid,text='대전은 텔레그램 그룹에서 진행합니다. 아래 버튼으로 봇을 그룹에 추가하세요.',reply_markup={'inline_keyboard':[[{'text':'그룹에 발할라 추가','url':'https://t.me/ValhallaBattle_bot?startgroup=true'}]]}); return
+        if t in ('/create','⚔ 매치 개설'): choose_game(cid)
+        else: lobby(cid)
+        return
+    if m.get('new_chat_members'):
+        if any(x.get('username','').lower()=='valhallabattle_bot' for x in m['new_chat_members']): menu(cid)
+        return
+    if chat['type']=='private': return
     if 'dice' in m and not m.get('forward_origin') and not m.get('via_bot'):
         d=m['dice']; result=roll(cid,user,m['message_id'],d['emoji'],d['value']);
         if result: send(cid,result)
