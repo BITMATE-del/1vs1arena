@@ -6,6 +6,7 @@ export function createMatchFlow(db, send, roomService, games, modes, rounds, opt
   const run=(q,...a)=>db.prepare(q).run(...a);
   db.exec("CREATE TABLE IF NOT EXISTS match_requests(code TEXT PRIMARY KEY,owner INTEGER NOT NULL,guest INTEGER,game TEXT NOT NULL DEFAULT '🎲',mode TEXT NOT NULL DEFAULT 'wins',rounds INTEGER NOT NULL DEFAULT 3,status TEXT NOT NULL,created INTEGER NOT NULL,expires INTEGER NOT NULL,match_id INTEGER,room_code TEXT,ready_owner INTEGER NOT NULL DEFAULT 0,ready_guest INTEGER NOT NULL DEFAULT 0,notice_owner INTEGER NOT NULL DEFAULT 0,notice_guest INTEGER NOT NULL DEFAULT 0,updated INTEGER NOT NULL)");
   db.exec("CREATE TABLE IF NOT EXISTS match_inputs(user_id INTEGER PRIMARY KEY,kind TEXT NOT NULL,created INTEGER NOT NULL)");
+  try{db.exec("ALTER TABLE match_requests ADD COLUMN source TEXT NOT NULL DEFAULT 'direct'");}catch(e){if(!String(e.message).includes('duplicate column name'))throw e;}
   db.exec("CREATE TABLE IF NOT EXISTS match_flow_settings(key TEXT PRIMARY KEY,value TEXT NOT NULL)");
   const config=(key,defaultValue)=>one('SELECT value FROM match_flow_settings WHERE key=?',key)?.value??defaultValue;
   const mins=()=>Math.max(5,Math.min(120,Number(config('request_minutes','60'))||60));
@@ -38,19 +39,19 @@ export function createMatchFlow(db, send, roomService, games, modes, rounds, opt
     chooseGame(user,code);
   }
   function lobby(user){const rows=all("SELECT * FROM match_requests WHERE status='public' AND expires>? ORDER BY created DESC LIMIT 15",Date.now());if(!rows.length){send(user,'🏛 현재 공개 대기 중인 매치가 없습니다.',[[btn('➕ 공개 매치 만들기','mf:public'),btn('🏠 메인','mf:home')]]);return;}for(const r of rows)send(user,'🏛 '+r.code+'\n개설자: '+name(r.owner)+'\n'+r.game+' · '+modes[r.mode]+' · '+r.rounds+'판',[[btn('⚔ 참가 신청','mf:join:'+r.code)]]);}
-  function mine(user){const rows=all("SELECT * FROM match_requests WHERE (owner=? OR guest=?) ORDER BY created DESC LIMIT 10",user,user);if(!rows.length){send(user,'아직 신청한 대전이 없습니다.',[[btn('⚔ 매치 개설','mf:begin')]]);return;}for(const r of rows){const labels={selecting:'조건 설정',public:'공개 대기',pending:'수락 대기',room_pending:'그룹 생성',room_ready:'입장 및 준비',playing:'경기 진행',finished:'경기 종료',cancelled:'취소',expired:'만료',failed:'오류'};send(user,r.code+' · '+(labels[r.status]||r.status)+'\n'+r.game+' '+r.rounds+'판\n상대방: '+(r.guest?name(r.guest):'미정'),r.status==='room_ready'?[[btn('✅ 공지 확인','mf:notice:'+r.code)],[btn('🎮 준비 완료','mf:ready:'+r.code)]]:undefined);}}
-  function groupReady(code,room){const r=get(code);if(!r||r.status!=='room_pending')return;
+  function mine(user){const rows=all("SELECT * FROM match_requests WHERE (owner=? OR guest=?) ORDER BY created DESC LIMIT 10",user,user);if(!rows.length){send(user,'아직 신청한 대전이 없습니다.',[[btn('⚔ 매치 개설','mf:begin')]]);return;}for(const r of rows){const labels={selecting:'조건 설정',public:'공개 대기',pending:'수락 대기',room_pending:'그룹 생성',room_ready:'입장 및 준비',playing:'경기 진행',finished:'경기 종료',cancelled:'취소',expired:'만료',failed:'오류'};send(user,r.code+' · '+(labels[r.status]||r.status)+'\n'+r.game+' '+r.rounds+'판\n상대방: '+(r.guest?name(r.guest):'미정'),r.status==='room_ready'&&roomService.getByCode(r.room_code)?.link?[[{text:'🚪 전용 그룹 입장',url:user===r.owner?roomService.getByCode(r.room_code).link:roomService.getByCode(r.room_code).link_guest}]]:undefined);}}
+  function groupReady(code,room){const r=get(code);if(!r||r.status!=='room_pending'||!room?.chat||!room?.linkOwner||!room?.linkGuest)return;
     const id=Number(run("INSERT INTO matches(chat,owner,guest,game,mode,rounds,state) VALUES(?,?,?,?,?,?,'waiting')",room.chat,r.owner,r.guest,r.game,r.mode,r.rounds).lastInsertRowid);
-    run("UPDATE match_requests SET status='room_ready',match_id=?,updated=? WHERE code=?",id,Date.now(),code);
+    run("UPDATE match_requests SET status='room_ready',room_code=COALESCE(room_code,?),match_id=?,updated=? WHERE code=?",room.code,id,Date.now(),code);
     send(room.chat,text('room_notice','📌 GLORY ARENA 경기 안내\n\n양측 모두 공지 확인 후 준비 완료를 눌러주세요.\n입금, 보증금, 수수료 없이 진행되는 무료 대전입니다.\n승패는 공식 텔레그램 이모지 결과로 기록됩니다.')+'\n\n매치: '+code+'\n'+r.game+' '+r.rounds+'판',[[btn('✅ 공지 확인','mf:notice:'+code)],[btn('🎮 준비 완료','mf:ready:'+code)]]);
     send(r.owner,'✅ 대전방 생성 완료: '+code+'\n비공개 그룹 입장 후 공지를 확인해 주세요.',[[{text:'🚪 그룹 입장',url:room.linkOwner}]]);
     send(r.guest,'✅ 대전이 성사되었습니다: '+code+'\n비공개 그룹에 입장하고 공지를 확인해 주세요.',[[{text:'🚪 그룹 입장',url:room.linkGuest}]]);
   }
   function groupFailed(code){const r=get(code);if(!r)return;run("UPDATE match_requests SET status='failed',updated=? WHERE code=?",Date.now(),code);send(r.owner,'전용 대전방 생성에 실패했습니다. 운영자에게 알려주세요. ('+code+')');if(r.guest)send(r.guest,'전용 대전방 생성에 실패했습니다. ('+code+')');}
-  function notice(user,code){const r=get(code);if(!r||r.status!=='room_ready'||(user!==r.owner&&user!==r.guest))return;
+  function notice(user,code,chat){const r=get(code);if(!r||r.status!=='room_ready'||(user!==r.owner&&user!==r.guest)||roomService.getByCode(r.room_code)?.chat!==chat){send(user,'전용 그룹 안에서 공지 확인 버튼을 눌러주세요.');return;}
     const column=user===r.owner?'notice_owner':'notice_guest';run('UPDATE match_requests SET '+column+'=1,updated=? WHERE code=?',Date.now(),code);send(user,'✅ 공지 확인 완료: '+code+'\n이제 준비 완료를 눌러주세요.',[[btn('🎮 준비 완료','mf:ready:'+code)]]);
   }
-  function ready(user,code){const r=get(code);if(!r||r.status!=='room_ready'||(user!==r.owner&&user!==r.guest))return;
+  function ready(user,code,chat){const r=get(code);if(!r||r.status!=='room_ready'||(user!==r.owner&&user!==r.guest)||roomService.getByCode(r.room_code)?.chat!==chat){send(user,'전용 그룹 안에서 준비 완료 버튼을 눌러주세요.');return;}
     if(user===r.owner&&!r.notice_owner||user===r.guest&&!r.notice_guest){send(user,'먼저 공지를 확인해 주세요.',[[btn('📌 공지 확인','mf:notice:'+code)]]);return;}
     const column=user===r.owner?'ready_owner':'ready_guest';
     run('UPDATE match_requests SET '+column+'=1,updated=? WHERE code=?',Date.now(),code);
@@ -66,20 +67,21 @@ export function createMatchFlow(db, send, roomService, games, modes, rounds, opt
     if(op==='game'&&r.owner===user&&r.status==='selecting'&&games[p[3]]&&options.gameEnabled?.(p[3])!==false){run('UPDATE match_requests SET game=?,updated=? WHERE code=?',p[3],Date.now(),code);send(user,'경기 방식을 선택해 주세요.',Object.entries(modes).map(([k,v])=>[btn(v,'mf:mode:'+code+':'+k)]));return true;}
     if(op==='mode'&&r.owner===user&&r.status==='selecting'&&modes[p[3]]){run('UPDATE match_requests SET mode=?,updated=? WHERE code=?',p[3],Date.now(),code);send(user,'경기 횟수를 선택하세요.',[rounds.map(n=>btn(n+'판','mf:round:'+code+':'+n))]);return true;}
     if(op==='round'&&r.owner===user&&r.status==='selecting'&&rounds.includes(Number(p[3]))){run('UPDATE match_requests SET rounds=?,updated=? WHERE code=?',Number(p[3]),Date.now(),code);send(user,'✅ 최종 확인\n'+code+'\n'+r.game+' · '+modes[r.mode]+' · '+Number(p[3])+'판\n'+(r.guest?'상대: '+name(r.guest):'공개 대기실에 등록'),[[btn(r.guest?'📩 상대에게 신청':'🏛 대기실에 공개','mf:submit:'+code),btn('❌ 취소','mf:cancel:'+code)]]);return true;}
-    if(op==='submit'&&r.owner===user&&r.status==='selecting'){if(r.guest)request(user,code);else{run("UPDATE match_requests SET status='public',expires=?,updated=? WHERE code=?",Date.now()+mins()*60000,Date.now(),code);send(user,'✅ 공개 대기실에 등록됐습니다. '+code);}return true;}
+    if(op==='submit'&&r.owner===user&&r.status==='selecting'){if(r.guest)request(user,code);else{run("UPDATE match_requests SET status='public',source='public',expires=?,updated=? WHERE code=?",Date.now()+mins()*60000,Date.now(),code);send(user,'✅ 공개 대기실에 등록됐습니다. '+code);}return true;}
     if(op==='join'&&r.status==='public'&&r.owner!==user){const applied=run("UPDATE match_requests SET guest=?,status='pending',updated=? WHERE code=? AND status='public'",user,Date.now(),code);if(applied.changes){send(r.owner,'⚔️ 대전 참가 신청\n'+r.code+'\n신청자: '+name(user),[[btn('✅ 수락','mf:accept:'+code),btn('❌ 거절','mf:reject:'+code)]]);send(user,'신청 완료. 개설자 수락을 기다립니다.');}return true;}
-    if(op==='accept'&&r.status==='pending'&&(r.guest===user&&!r.guest===r.owner||r.owner===user&&r.guest)){if(Date.now()>r.expires){expireOne(r);return true;}
-      const byPublic=r.owner===user;
-      if(!byPublic&&r.guest!==user)return true;
+    if(op==='accept'&&r.status==='pending'&&r.guest&&((r.source==='public'&&r.owner===user)||(r.source==='direct'&&r.guest===user))){if(Date.now()>r.expires){expireOne(r);return true;}
+      if(!roomService.connected()){send(user,'운영자 대전방 생성 계정이 연결되지 않았습니다.');return true;}
       const x=run("UPDATE match_requests SET status='room_pending',updated=? WHERE code=? AND status='pending'",Date.now(),code);
-      if(x.changes){roomService.requestPair({code:r.code,owner:r.owner,guest:r.guest},groupReady,groupFailed);send(r.owner,'✅ 대전 수락 완료. 전용 그룹을 생성합니다.');send(r.guest,'✅ 대전 수락 완료. 전용 그룹을 생성합니다.');}return true;}
+      if(x.changes){try{const roomCode=roomService.requestPair({code:r.code,owner:r.owner,guest:r.guest},groupReady,groupFailed);run("UPDATE match_requests SET room_code=? WHERE code=?",roomCode,code);}catch(e){run("UPDATE match_requests SET status='failed',updated=? WHERE code=?",Date.now(),code);send(r.owner,'그룹 생성 요청 실패. 운영자에게 문의하세요.');send(r.guest,'그룹 생성 요청 실패. 운영자에게 문의하세요.');return true;}send(r.owner,'✅ 대전 수락 완료. 전용 그룹을 생성합니다.');send(r.guest,'✅ 대전 수락 완료. 전용 그룹을 생성합니다.');}return true;}
     if(op==='reject'&&r.status==='pending'&&(r.owner===user||r.guest===user)){if(r.guest)send(r.owner,'❌ 대전 신청이 거절되었습니다: '+code);if(r.guest)send(r.guest,'❌ 대전 신청이 거절되었습니다: '+code);run("UPDATE match_requests SET status='cancelled',updated=? WHERE code=?",Date.now(),code);return true;}
     if(op==='cancel'&&r.owner===user&&['selecting','public','pending'].includes(r.status)){run("UPDATE match_requests SET status='cancelled',updated=? WHERE code=?",Date.now(),code);if(r.guest)send(r.guest,'대전 신청이 취소되었습니다: '+code);send(user,'취소되었습니다.');return true;}
-    if(op==='notice'){notice(user,code);return true;}if(op==='ready'){ready(user,code);return true;}
+    if(op==='notice'){notice(user,code,chat);return true;}if(op==='ready'){ready(user,code,chat);return true;}
     send(user,'이미 처리된 요청이거나 권한이 없습니다.');return true;
   }
   function expireOne(r){run("UPDATE match_requests SET status='expired',updated=? WHERE code=? AND status IN ('selecting','public','pending')",Date.now(),r.code);send(r.owner,'⌛ 매치 '+r.code+' 신청 시간이 만료됐습니다.');if(r.guest)send(r.guest,'⌛ 매치 '+r.code+' 신청 시간이 만료됐습니다.');}
-  function tick(){const jobs=all("SELECT * FROM match_requests WHERE status IN ('selecting','public','pending') AND expires<? LIMIT 25",Date.now());for(const r of jobs)expireOne(r);}
+  function tick(){const jobs=all("SELECT * FROM match_requests WHERE status IN ('selecting','public','pending') AND expires<? LIMIT 25",Date.now());for(const r of jobs)expireOne(r);
+    const pending=all("SELECT * FROM match_requests WHERE status='room_pending' LIMIT 20");for(const r of pending){const room=roomService.getByCode(r.room_code||('R-'+r.code));if(room?.status==='ready'&&room.link&&room.link_guest)groupReady(r.code,{chat:room.chat,linkOwner:room.link,linkGuest:room.link_guest,code:room.code});else if(room?.status==='failed')groupFailed(r.code);}
+  }
   function finished(chat){const r=byChat(chat);if(r&&r.status==='playing'){run("UPDATE match_requests SET status='finished',updated=? WHERE code=?",Date.now(),r.code);roomService.finish(r.room_code);send(r.owner,'🏆 '+r.code+' 경기가 종료되었습니다. 내 전적에서 결과를 확인하세요.');send(r.guest,'🏆 '+r.code+' 경기가 종료되었습니다. 내 전적에서 결과를 확인하세요.');}}
   function cancelForAdmin(code){const r=get(code);if(!r||['finished','cancelled','expired'].includes(r.status))return false;run("UPDATE match_requests SET status='cancelled',updated=? WHERE code=?",Date.now(),code);if(r.match_id)run("UPDATE matches SET state='cancelled' WHERE id=? AND state!='finished'",r.match_id);send(r.owner,'운영자에 의해 대전이 중단됐습니다: '+code);if(r.guest)send(r.guest,'운영자에 의해 대전이 중단됐습니다: '+code);return true;}
   return {sendMain,tutorial,begin,lobby,mine,onText,onCallback,tick,finished,cancelForAdmin,get,config};
