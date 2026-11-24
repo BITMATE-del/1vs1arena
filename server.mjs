@@ -155,7 +155,7 @@ const roomService=createRoomService(db,telegramAuth,username,send);
 const matchBoard=createMatchBoard(db,enqueue);
 let matchFlow;
 const matchWatch=createMatchWatch(db,send,{getConfig:(k)=>setting(k,''),onTimeout:(id)=>matchFlow?.timeoutMatch(id)});
-matchFlow=createMatchFlow(db,send,roomService,games,modes,rounds,{gameEnabled,onMatchStart:id=>{matchWatch.arm(id);matchBoard.queueMatch(id);},onMatchStopped:id=>{matchWatch.touch(id);matchBoard.queueMatch(id);}});
+matchFlow=createMatchFlow(db,send,roomService,games,modes,rounds,{gameEnabled,onMatchStart:id=>{matchWatch.arm(id);matchBoard.queueMatch(id);},onMatchStopped:id=>{matchWatch.touch(id);matchBoard.queueMatch(id);},onCloseFailed:(id,code)=>matchWatch.incident('room_close_failed',id||0,'그룹 종료 실패 '+code)});
 matchWatch.sync();
 const adminAttempts=new Map();
 const adminGlobalAttempts={count:0,until:0};
@@ -172,7 +172,7 @@ if(path==='/admin/login'&&req.method==='POST'){const ip=String(req.headers['x-re
 if(path==='/admin/logout'&&req.method==='POST'){res.writeHead(303,{'location':'/admin','set-cookie':'ga_admin=; Path=/admin; HttpOnly; Secure; SameSite=Strict; Max-Age=0'}).end();return true;}
 
 if(!adminAuth(req)){if(req.method!=='GET'){res.writeHead(403).end();return true;}adminPage(res,'<section class="login"><h1>GLORY ARENA</h1><p>관리자 전용 로그인</p><form method="post" action="/admin/login"><label>관리자 비밀번호<input type="password" name="password" required autocomplete="current-password"></label><button>로그인</button></form></section>');return true;}
-const sections={overview:'대시보드',users:'회원 관리',rooms:'방 관리',matches:'경기 관리',records:'판정 기록',games:'게임 설정',telegram:'텔레그램 계정 관리',requests:'대전 신청 관리',bot:'봇 설정',audit:'운영 로그'};
+const sections={overview:'대시보드',users:'회원 관리',rooms:'방 관리',matches:'경기 관리',records:'판정 기록',games:'게임 설정',telegram:'텔레그램 계정 관리',requests:'대전 신청 관리',operations:'운영 안정성',bot:'봇 설정',audit:'운영 로그'};
 const url=new URL(req.url,base);
 const tab=Object.hasOwn(sections,url.searchParams.get('tab'))?url.searchParams.get('tab'):'overview';
 const csrf=createHash('sha256').update(secret+':csrf:'+String(req.headers.cookie||'')).digest('hex');
@@ -184,6 +184,7 @@ const q=new URLSearchParams(raw),provided=q.get('csrf')||'';
 if(!/^[a-f0-9]{64}$/.test(provided)||!timingSafeEqual(Buffer.from(provided),Buffer.from(csrf))){res.writeHead(403).end();return true;}
 const act=q.get('action'),id=Number(q.get('id')),value=q.get('value')||'';let changed=false;
 if(act==='mr_cancel'&&/^GA-[A-F0-9]{8}$/.test(String(q.get('code')||''))){const done=matchFlow.cancelForAdmin(q.get('code'));res.writeHead(303,{location:'/admin?tab=requests&saved='+Number(done)}).end();void drain();return true;}
+if(act==='close_retry'&&/^GA-[A-F0-9]{8}$/.test(String(q.get('code')||''))){const code=q.get('code');const done=matchFlow.retryCloseForAdmin(code);if(done)run('INSERT INTO admin_audit(at,action,target) VALUES(?,?,?)',Date.now(),'close_retry',code);res.writeHead(303,{location:'/admin?tab=operations&saved='+Number(done)}).end();void drain();return true;}
 if(act==='mr_force'&&/^GA-[A-F0-9]{8}$/.test(String(q.get('code')||''))){const code=q.get('code');const done=matchFlow.forceCloseForAdmin(code);if(done)run('INSERT INTO admin_audit(at,action,target) VALUES(?,?,?)',Date.now(),'force_match_close',code);res.writeHead(303,{location:'/admin?tab=requests&saved='+Number(done)}).end();void drain();return true;}
 if(['tg_send','tg_code','tg_password','tg_session','tg_verify','tg_logout','tg_cancel'].includes(act)){
 let result='ok';try{
@@ -210,6 +211,7 @@ if(!one("SELECT 1 FROM matches WHERE chat=? AND state IN ('active','requested','
 }
 if(act==='cancel'&&Number.isSafeInteger(id)){const m=one("SELECT * FROM matches WHERE id=? AND state IN ('waiting','requested')",id);if(m){run("UPDATE matches SET state='cancelled' WHERE id=?",id);send(m.chat,'운영 정책에 따라 대기 매치가 취소되었습니다.');changed=true;}}
 if(act==='game'&&Object.hasOwn(games,q.get('id'))&&['0','1'].includes(value)){run('INSERT INTO arena_settings VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value','game:'+q.get('id'),value);changed=true;}
+if(['turn_warn_minutes','turn_timeout_minutes'].includes(act)&&Number.isInteger(Number(value))&&Number(value)>=1&&Number(value)<=1440){const other=act==='turn_warn_minutes'?Number(setting('turn_timeout_minutes','20')):Number(setting('turn_warn_minutes','3'));if((act==='turn_warn_minutes'&&Number(value)<other)||(act==='turn_timeout_minutes'&&Number(value)>other)){run('INSERT INTO arena_settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',act,value);changed=true;}}
 if(act==='matches_enabled'&&['0','1'].includes(value)){run('INSERT INTO arena_settings VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',act,value);changed=true;}
 if(act==='flow_minutes'&&Number.isInteger(Number(value))&&Number(value)>=5&&Number(value)<=120){run("INSERT INTO match_flow_settings(key,value) VALUES('request_minutes',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",value);changed=true;}
 if(act==='flow_guide'&&value.trim().length>0&&value.length<=1800){run("INSERT INTO match_flow_settings(key,value) VALUES('text_guide',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",value);changed=true;}
@@ -267,6 +269,21 @@ content='<section><h2>대전 신청 현황</h2><p>상대 확인, 신청 수락, 
 '<section><h2>대전 자동 진행 설정</h2><p>신청 수락 대기 시간(5~120분)</p>'+form('flow_minutes','', '<input type="number" name="value" min="5" max="120" value="'+esc(matchFlow.config('request_minutes','60'))+'">','저장')+'</section>'+
 '<section><h2>이용 안내 문구</h2>'+form('flow_guide','', '<textarea name="value" rows="9" maxlength="1800" required>'+esc(matchFlow.config('text_guide','📖 GLORY ARENA 이용 안내\n1. 상대를 지정하거나 대기실에서 신청\n2. 상대방 수락\n3. 전용 비공개 그룹 생성\n4. 양측 준비 완료\n5. 공식 이모지 게임으로 대전\n모든 대전은 무료입니다.'))+'</textarea>','문구 저장')+'</section>'+
 '<section><h2>전용 그룹 공지 문구</h2>'+form('flow_room_notice','', '<textarea name="value" rows="9" maxlength="1800" required>'+esc(matchFlow.config('text_room_notice','📌 GLORY ARENA 경기 안내\n\n두 참가자 모두 공지를 확인하고 준비 완료를 눌러주세요.\n모든 대전은 무료입니다.'))+'</textarea>','문구 저장')+'</section>';
+}
+if(tab==='operations'){
+const summary=matchWatch.issueSummary();
+const alerts=all("SELECT i.* FROM arena_incidents i WHERE i.state='open' ORDER BY created DESC LIMIT 50");
+const failures=all("SELECT v.code,v.updated,v.state,v.last_error,r.status AS match_status,g.error AS room_error FROM match_continue_votes v LEFT JOIN match_requests r ON r.code=v.code LEFT JOIN generated_rooms g ON g.code=r.room_code WHERE v.state='close_failed' ORDER BY v.updated DESC LIMIT 30");
+const watches=all("SELECT m.id,m.chat,m.game,m.mode,m.round,w.turn_started,w.warned_at,w.alerted_at,u.username AS player FROM matches m JOIN match_turn_watch w ON w.match_id=m.id LEFT JOIN arena_users u ON u.id=m.turn WHERE m.state='active' ORDER BY w.turn_started ASC LIMIT 50");
+const cards=[['진행 중 경기',summary.active],['미응답 경고',summary.warnings],['미해결 사고',summary.incidents],['종료 실패',summary.closeFailures]];
+content='<div class="grid">'+cards.map(([k,v])=>'<section><small>'+esc(k)+'</small><div class="metric">'+esc(v)+'</div></section>').join('')+'</div>'+
+'<section><h2>경기 시간 제한 설정</h2><p>미응답 경고 이후 제한시간이 지나면 진행 중인 경기만 중단합니다. 기존 전적은 그대로 유지합니다.</p>'+
+form('turn_warn_minutes','', '<label>미응답 안내 (분)<input type="number" name="value" min="1" max="1440" value="'+esc(setting('turn_warn_minutes','3'))+'"></label>','경고 시간 저장')+
+form('turn_timeout_minutes','', '<label>자동 종료 (분)<input type="number" name="value" min="1" max="1440" value="'+esc(setting('turn_timeout_minutes','20'))+'"></label>','제한시간 저장')+'</section>'+
+'<section><h2>현재 경기 모니터링</h2>'+table(['경기','방','종목','라운드','현재 차례','턴 시작','경고'],watches.map(r=>tr([r.id,r.chat,r.game+' / '+(modes[r.mode]||r.mode),r.round,(r.player?'@'+r.player:'회원 ID '+(one('SELECT turn FROM matches WHERE id=?',r.id)?.turn||'-')),date(r.turn_started),r.warned_at?'경고 발송':'정상'])))+'</section>'+
+'<section><h2>운영 오류 및 경고</h2>'+table(['시간','종류','경기','그룹 코드','상세'],alerts.map(r=>tr([date(r.created),r.kind,r.match_id||'-',r.room_code||'-',r.detail])))+'</section>'+
+'<section><h2>삭제 실패 방 재처리</h2><p>자동 재시도를 반복하지 않습니다. 원인 확인 후 직접 재시도를 실행하세요.</p>'+
+table(['코드','상태','오류','관리'],failures.map(r=>tr([r.code,r.match_status||'-',r.room_error||r.last_error||'-'],'<td>'+form('close_retry','', '<input type="hidden" name="code" value="'+esc(r.code)+'">','방 삭제 재시도')+'</td>')))+'</section>';
 }
 if(tab==='audit'){const rows=all('SELECT * FROM admin_audit ORDER BY id DESC LIMIT 50 OFFSET ?',offset);const names={block:'회원 제한',unblock:'회원 제한 해제',note:'회원 메모',room_enable:'방 활성화',room_disable:'방 중단',cancel:'대기 경기 취소',game:'게임 설정',matches_enabled:'신규 매치 설정',welcome_caption:'시작 문구 수정'};content='<section><h2>관리자 변경 기록</h2>'+table(['시간','작업','대상'],rows.map(r=>tr([date(r.at),names[r.action]||r.action,r.target])))+paging()+'</section>';}
 const nav=Object.entries(sections).map(([k,v])=>'<a class="'+(k===tab?'selected':'')+'" href="/admin?tab='+k+'">'+v+'</a>').join('');
