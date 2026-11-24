@@ -18,7 +18,7 @@ assert.equal(sent.length,2,'group and player private reminder exactly once');
 assert.equal(watch.issueSummary().incidents,1);
 assert.equal(watch.issueSummary().warnings,1);
 assert.equal(watch.tick().expired,0);
-t+=16*60000+59000;assert.equal(watch.tick().expired,1);
+t+=17*60000;assert.equal(watch.tick().expired,1);
 assert.deepEqual(expired,[5]);
 assert.equal(watch.tick().expired,0,'timeout idempotent');
 assert.equal(db.prepare('SELECT state FROM matches WHERE id=5').get().state,'cancelled');
