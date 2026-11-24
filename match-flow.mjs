@@ -46,7 +46,7 @@ export function createMatchFlow(db, send, roomService, games, modes, rounds, opt
     chooseGame(user,code);
   }
   function lobby(user){const rows=all("SELECT * FROM match_requests WHERE status='public' AND expires>? ORDER BY created DESC LIMIT 15",Date.now());send(user,'🏛 GLORY ARENA 공개 매치 대기실\n\n원하는 경기의 참가 신청 버튼을 누르세요. 개설자의 수락 후 비공개 대전방을 생성합니다.\n현재 대기 중: '+rows.length+'건',[[btn('➕ 내 매치 대기 등록','mf:public')],[btn('🔄 대기 목록 새로고침','mf:lobby'),btn('🏠 메인 메뉴','mf:home')]]);if(!rows.length){send(user,'현재 참가 가능한 매치가 없습니다. 매치 대기를 등록해 다른 회원의 신청을 받아보세요.');return;}for(const r of rows){const remaining=Math.max(1,Math.ceil((r.expires-Date.now())/60000));send(user,'⏳ '+r.code+'\n개설자: '+name(r.owner)+'\n종목: '+r.game+' · '+modes[r.mode]+' · '+r.rounds+'판\n남은 대기 시간: 약 '+remaining+'분',r.owner===user?[[btn('❌ 내 대기 취소','mf:cancel:'+r.code)]]:[[btn('⚔ 이 매치에 참가 신청','mf:join:'+r.code)]]);}}
-  function mine(user){const rows=all("SELECT * FROM match_requests WHERE (owner=? OR guest=?) ORDER BY created DESC LIMIT 10",user,user);if(!rows.length){send(user,'아직 신청한 대전이 없습니다.',[[btn('⚔ 매치 개설','mf:begin')]]);return;}for(const r of rows){const labels={selecting:'조건 설정',public:'공개 대기',pending:'수락 대기',room_pending:'그룹 생성',room_ready:'입장 및 준비',playing:'경기 진행',finished:'경기 종료',cancelled:'취소',expired:'만료',failed:'오류'};send(user,r.code+' · '+(labels[r.status]||r.status)+'\n'+r.game+' '+r.rounds+'판\n상대방: '+(r.guest?name(r.guest):'미정'),r.status==='room_ready'&&roomService.getByCode(r.room_code)?.link?[[{text:'🚪 전용 그룹 입장',url:user===r.owner?roomService.getByCode(r.room_code).link:roomService.getByCode(r.room_code).link_guest}]]:undefined);}}
+  function mine(user){const rows=all("SELECT * FROM match_requests WHERE (owner=? OR guest=?) ORDER BY created DESC LIMIT 10",user,user);if(!rows.length){send(user,'아직 신청한 대전이 없습니다.',[[btn('⚔ 매치 개설','mf:begin')]]);return;}for(const r of rows){const labels={selecting:'조건 설정',public:'공개 대기',pending:'수락 대기',room_pending:'그룹 생성',room_ready:'입장 및 준비',playing:'경기 진행',finished:'경기 종료',cancelled:'취소',expired:'만료',failed:'오류'};send(user,r.code+' · '+(labels[r.status]||r.status)+'\n'+r.game+' '+r.rounds+'판\n상대방: '+(r.guest?name(r.guest):'미정'),['room_ready','playing'].includes(r.status)?[[btn('🔄 대전방 재입장·상태 복구','mf:resume:'+r.code)]]:undefined);}}
   function groupReady(code,room){const r=get(code);if(!r||r.status!=='room_pending'||!room?.chat||!room?.linkOwner||!room?.linkGuest)return;
     const id=Number(run("INSERT INTO matches(chat,owner,guest,game,mode,rounds,state) VALUES(?,?,?,?,?,?,'waiting')",room.chat,r.owner,r.guest,r.game,r.mode,r.rounds).lastInsertRowid);
     run("UPDATE match_requests SET status='room_ready',room_code=COALESCE(room_code,?),match_id=?,updated=? WHERE code=?",room.code,id,Date.now(),code);
@@ -96,9 +96,41 @@ export function createMatchFlow(db, send, roomService, games, modes, rounds, opt
     if(r.match_id)run("UPDATE matches SET state='cancelled',turn=NULL WHERE id=? AND state IN ('active','waiting','requested')",r.match_id);
     if(r.match_id&&r.status==='playing')options.onMatchStopped?.(r.match_id);
     run("INSERT INTO match_continue_votes(code,deadline,close_after,state,updated) VALUES(?,?,?,'closing',?) ON CONFLICT(code) DO UPDATE SET close_after=excluded.close_after,state='closing',updated=excluded.updated,last_error=NULL",r.code,now,now+12000,now);
-    const who=source==='admin'?'관리자 강제 종료': '양측 합의 종료';
+    const who=source==='admin'?'관리자 강제 종료':source==='timeout'?'응답 시간 초과 종료':'양측 합의 종료';
     if(room?.chat)send(room.chat,'🛑 '+who+'\n\n매치 '+r.code+'의 진행이 중단되었습니다.\n약 12초 후 전용 그룹이 종료됩니다.\n완료된 이전 경기 기록은 보존됩니다.');
     else{send(r.owner,'매치 '+r.code+'가 종료되었습니다.');if(r.guest)send(r.guest,'매치 '+r.code+'가 종료되었습니다.');}
+  }
+  function timeoutMatch(matchId){
+    const m=one("SELECT * FROM matches WHERE id=? AND state='active'",matchId);
+    if(!m)return false;
+    const r=get(one('SELECT code FROM match_requests WHERE match_id=?',matchId)?.code);
+    if(!r||r.status!=='playing')return false;
+    scheduleStop(r,'timeout');return true;
+  }
+  function retryCloseForAdmin(code){
+    const r=get(code),v=votesFor(code);
+    if(!r||!r.room_code||!v||v.state!=='close_failed')return false;
+    const room=roomService.getByCode(r.room_code);
+    if(!room||room.status==='closed')return false;
+    run("UPDATE match_continue_votes SET state='closing',close_after=?,last_error=NULL,updated=? WHERE code=? AND state='close_failed'",Date.now(),Date.now(),code);
+    void processClose(code);
+    return true;
+  }
+  async function resume(user,code){
+    const r=get(code);
+    if(!r||![r.owner,r.guest].includes(user)||!['room_ready','playing'].includes(r.status)){
+      send(user,'현재 재입장할 수 있는 대전방이 없습니다.');return;
+    }
+    const room=roomService.getByCode(r.room_code);
+    if(!room?.chat){send(user,'대전방이 아직 준비되지 않았습니다.');return;}
+    try{
+      const link=await roomService.freshInvite(r.room_code,user===r.owner?'owner':'guest');
+      send(user,'🔄 대전방 복귀 안내\n'+r.code+' · '+r.game+' '+r.rounds+'판\n현재 진행 상황은 그룹의 고정 경기판에서 확인할 수 있습니다.',[[{text:'🚪 대전방 재입장',url:link}]]);
+      if(r.status==='playing')options.onMatchStart?.(r.match_id);
+    }catch(e){
+      send(user,'대전방 재입장 링크 발급에 실패했습니다. 관리자에게 문의해 주세요.');
+      console.warn('Resume invite failed',{code,reason:String(e?.errorMessage||e?.message||'error').slice(0,65)});
+    }
   }
   function forceCloseForAdmin(code){
     const r=get(code);if(!r)return false;
@@ -112,6 +144,7 @@ export function createMatchFlow(db, send, roomService, games, modes, rounds, opt
   function onCallback(user,chat,p){if(p[0]!=='mf')return false;const op=p[1],code=p[2],r=code?get(code):null;
     if(op==='home'){sendMain(user);return true;}if(op==='help'){tutorial(user);return true;}if(op==='begin'){begin(user);return true;}if(op==='input_cancel'){run('DELETE FROM match_inputs WHERE user_id=?',user);sendMain(user);return true;}
     if(op==='lobby'){lobby(user);return true;}if(op==='mine'){mine(user);return true;}if(op==='public'){createPublic(user);return true;}
+    if(op==='resume'&&code){void resume(user,code);return true;}
     if(!r){send(user,'대전 요청을 찾을 수 없습니다.');return true;}
     if(op==='confirm'&&r.owner===user&&r.status==='selecting'){chooseGame(user,code);return true;}
     if(op==='game'&&r.owner===user&&r.status==='selecting'&&games[p[3]]&&options.gameEnabled?.(p[3])!==false){run('UPDATE match_requests SET game=?,mode=?,updated=? WHERE code=?',p[3],'wins',Date.now(),code);send(user,'경기 방식을 선택해 주세요.',Object.entries(modes).filter(([k])=>r.game==='🎲'||!isSpecialMode(k)).map(([k,v])=>[btn(v,'mf:mode:'+code+':'+k)]));return true;}
@@ -197,5 +230,5 @@ export function createMatchFlow(db, send, roomService, games, modes, rounds, opt
   }
 
   function cancelForAdmin(code){const r=get(code);if(!r||['finished','cancelled','expired'].includes(r.status))return false;run("UPDATE match_requests SET status='cancelled',updated=? WHERE code=?",Date.now(),code);if(r.match_id)run("UPDATE matches SET state='cancelled' WHERE id=? AND state!='finished'",r.match_id);send(r.owner,'운영자에 의해 대전이 중단됐습니다: '+code);if(r.guest)send(r.guest,'운영자에 의해 대전이 중단됐습니다: '+code);return true;}
-  return {sendMain,tutorial,begin,lobby,mine,onText,onCallback,tick,finished,cancelForAdmin,forceCloseForAdmin,stopByChat,get,config,votesFor,stopFor,processClose};
+  return {sendMain,tutorial,begin,lobby,mine,onText,onCallback,tick,finished,cancelForAdmin,forceCloseForAdmin,stopByChat,timeoutMatch,retryCloseForAdmin,resume,get,config,votesFor,stopFor,processClose};
 }
