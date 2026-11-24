@@ -2,6 +2,7 @@ import http from 'node:http';
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { createTelegramAuth } from './telegram-auth.mjs';
 import { createRoomService } from './rooms.mjs';
+import { createMatchFlow } from './match-flow.mjs';
 import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
@@ -44,7 +45,7 @@ db.exec('CREATE TABLE IF NOT EXISTS welcome_settings(key TEXT PRIMARY KEY,value 
 const welcomeSetupHash='f27a916bb327294d267c9cf51a30a058c19be78304a25309a0ae278c63ab20f5';
 function menu(chat){
 const photo=process.env.WELCOME_PHOTO_FILE_ID||one("SELECT value FROM welcome_settings WHERE key='photo'")?.value;
-const buttons=[[button('⚔ 매치 개설','choose'),button('🏛 대기실 입장','lobby')],[button('📊 내 전적','stats'),button('📖 이용 안내','guide')]];
+const buttons=[[button('⚔ 매치 개설','mf:begin'),button('🏛 대기실','mf:lobby')],[button('🎮 내 경기','mf:mine'),button('📊 내 전적','stats')],[button('📖 이용 안내','mf:help')]];
 const caption=setting('welcome_caption','⚜️ GLORY ARENA\n━━━━━━━━━━━━━━\n승부의 끝, 영광의 시작.\n\n당신의 다음 승부를 시작하세요.\n매치를 개설하거나 대기실에서 상대를 만나보세요.\n\n1vs1 무료 대전 · 텔레그램 공식 게임');
 if(photo)enqueue('sendPhoto',{chat_id:chat,photo,caption,reply_markup:{inline_keyboard:buttons}});
 else send(chat,'GLORY ARENA\n'+caption,buttons);
@@ -85,14 +86,15 @@ const av=one('SELECT value FROM rolls WHERE match=? AND round=? AND player=?',id
 let a=row.a,b=row.b;if(row.mode==='total'){a+=av;b+=v;}else{a+=Number(av>v);b+=Number(v>av);}
 const done=r>=row.rounds||(row.mode==='wins'&&Math.max(a,b)>=Math.floor(row.rounds/2)+1);
 run('UPDATE matches SET a=?,b=?,state=?,round=?,turn=? WHERE id=?',a,b,done?'finished':'active',done?r:r+1,done?null:row.owner,id);
-send(cid,r+'라운드: '+av+' : '+v+'\n누적 '+a+' : '+b+'\n'+(done?'경기 종료 — '+(a===b?'무승부':a>b?'개설자 승리':'신청자 승리'):'다음 라운드: 개설자 차례'));}
+send(cid,r+'라운드: '+av+' : '+v+'\n누적 '+a+' : '+b+'\n'+(done?'경기 종료 — '+(a===b?'무승부':a>b?'개설자 승리':'신청자 승리'):'다음 라운드: 개설자 차례'));if(done)matchFlow.finished(cid);}
 function handle(u){track(u);const actor=u.callback_query?.from||u.message?.from;const chat=u.callback_query?.message?.chat||u.message?.chat;if(actor&&blocked(actor.id)){if(u.callback_query)enqueue('answerCallbackQuery',{callback_query_id:u.callback_query.id,text:'이용이 제한된 계정입니다.',show_alert:true});else if(chat?.type==='private')send(chat.id,'이용이 제한된 계정입니다.');return;}if(chat&&roomDisabled(chat.id)&&chat.type!=='private')return;const q=u.callback_query;
 if(q){const chat=q.message?.chat;if(!chat||!q.from||typeof q.data!=='string')return;const cid=chat.id,user=q.from.id,p=q.data.split(':');
 enqueue('answerCallbackQuery',{callback_query_id:q.id});
+if(p[0]==='mf'&&matchFlow.onCallback(user,cid,p))return;
 if(p[0]==='menu'){menu(cid);return;}
 if(p[0]==='stats'){stats(cid,user);return;}
 if(p[0]==='guide'){guide(cid);return;}
-if(chat.type==='private'){if(p[0]==='choose'){roomService.request(user);return;}groupLink(cid);return;}
+if(chat.type==='private'){if(p[0]==='choose'){matchFlow.begin(user);return;}if(p[0]==='lobby'){matchFlow.lobby(user);return;}groupLink(cid);return;}
 if(p[0]==='lobby'){lobby(cid);return;}
 if(p[0]==='choose'){choose(cid);return;}
 if(p[0]==='game'&&Object.hasOwn(games,p[1])){send(cid,'경기 방식 선택',Object.entries(modes).map(([k,t])=>[button(t,'mode:'+p[1]+':'+k)]));return;}
@@ -103,8 +105,9 @@ const m=u.message;if(!m?.from||!['private','group','supergroup'].includes(m.chat
 if(setWelcome(m))return;
 const cid=m.chat.id,t=(m.text||'').split(/\s+/)[0].split('@')[0],full=m.text||'';
 if(['/start','/help'].includes(t)||full==='🏠 메인 메뉴'){menu(cid);return;}
-if(full==='📖 이용 안내'){guide(cid);return;}
-if(t==='/create'||t==='/lobby'||['⚔ 매치 개설','🏛 매치 대기실'].includes(full)){if(m.chat.type==='private'){groupLink(cid);return;}if(t==='/create'||full==='⚔ 매치 개설')choose(cid);else lobby(cid);return;}
+if(full==='📖 이용 안내'){matchFlow.tutorial(cid);return;}
+if(m.chat.type==='private'&&matchFlow.onText(m.from.id,full))return;
+if(t==='/create'||t==='/lobby'||['⚔ 매치 개설','🏛 매치 대기실'].includes(full)){if(m.chat.type==='private'){if(t==='/create'||full==='⚔ 매치 개설')matchFlow.begin(m.from.id);else matchFlow.lobby(m.from.id);return;}if(t==='/create'||full==='⚔ 매치 개설')choose(cid);else lobby(cid);return;}
 if(m.new_chat_members?.some(x=>x.id===botId)){menu(cid);return;}
 if(m.chat.type!=='private'&&m.dice&&!m.forward_origin&&!m.forward_date&&!m.via_bot&&!m.sender_chat&&!m.from.is_bot)roll(m);
 }
@@ -122,6 +125,7 @@ function validSecret(req){const a=Buffer.from(String(req.headers['x-telegram-bot
 const adminPassword=process.env.ADMIN_PASSWORD||'';
 const telegramAuth=createTelegramAuth(db,secret,adminPassword);
 const roomService=createRoomService(db,telegramAuth,username,send);
+const matchFlow=createMatchFlow(db,send,roomService,games,modes,rounds,{gameEnabled});
 const adminAttempts=new Map();
 const adminGlobalAttempts={count:0,until:0};
 const escapeHtml=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -137,7 +141,7 @@ if(path==='/admin/login'&&req.method==='POST'){const ip=String(req.headers['x-re
 if(path==='/admin/logout'&&req.method==='POST'){res.writeHead(303,{'location':'/admin','set-cookie':'ga_admin=; Path=/admin; HttpOnly; Secure; SameSite=Strict; Max-Age=0'}).end();return true;}
 
 if(!adminAuth(req)){if(req.method!=='GET'){res.writeHead(403).end();return true;}adminPage(res,'<section class="login"><h1>GLORY ARENA</h1><p>관리자 전용 로그인</p><form method="post" action="/admin/login"><label>관리자 비밀번호<input type="password" name="password" required autocomplete="current-password"></label><button>로그인</button></form></section>');return true;}
-const sections={overview:'대시보드',users:'회원 관리',rooms:'방 관리',matches:'경기 관리',records:'판정 기록',games:'게임 설정',telegram:'텔레그램 계정 관리',bot:'봇 설정',audit:'운영 로그'};
+const sections={overview:'대시보드',users:'회원 관리',rooms:'방 관리',matches:'경기 관리',records:'판정 기록',games:'게임 설정',telegram:'텔레그램 계정 관리',requests:'대전 신청 관리',bot:'봇 설정',audit:'운영 로그'};
 const url=new URL(req.url,base);
 const tab=Object.hasOwn(sections,url.searchParams.get('tab'))?url.searchParams.get('tab'):'overview';
 const csrf=createHash('sha256').update(secret+':csrf:'+String(req.headers.cookie||'')).digest('hex');
@@ -148,6 +152,7 @@ let raw='';for await(const chunk of req){raw+=chunk.toString();if(raw.length>120
 const q=new URLSearchParams(raw),provided=q.get('csrf')||'';
 if(!/^[a-f0-9]{64}$/.test(provided)||!timingSafeEqual(Buffer.from(provided),Buffer.from(csrf))){res.writeHead(403).end();return true;}
 const act=q.get('action'),id=Number(q.get('id')),value=q.get('value')||'';let changed=false;
+if(act==='mr_cancel'&&/^GA-[A-F0-9]{8}$/.test(String(q.get('code')||''))){const done=matchFlow.cancelForAdmin(q.get('code'));res.writeHead(303,{location:'/admin?tab=requests&saved='+Number(done)}).end();void drain();return true;}
 if(['tg_send','tg_code','tg_password','tg_session','tg_verify','tg_logout','tg_cancel'].includes(act)){
 let result='ok';try{
 if(act==='tg_send')await telegramAuth.start((q.get('phone')||'').trim());
@@ -174,6 +179,9 @@ if(!one("SELECT 1 FROM matches WHERE chat=? AND state IN ('active','requested','
 if(act==='cancel'&&Number.isSafeInteger(id)){const m=one("SELECT * FROM matches WHERE id=? AND state IN ('waiting','requested')",id);if(m){run("UPDATE matches SET state='cancelled' WHERE id=?",id);send(m.chat,'운영 정책에 따라 대기 매치가 취소되었습니다.');changed=true;}}
 if(act==='game'&&Object.hasOwn(games,q.get('id'))&&['0','1'].includes(value)){run('INSERT INTO arena_settings VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value','game:'+q.get('id'),value);changed=true;}
 if(act==='matches_enabled'&&['0','1'].includes(value)){run('INSERT INTO arena_settings VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',act,value);changed=true;}
+if(act==='flow_minutes'&&Number.isInteger(Number(value))&&Number(value)>=5&&Number(value)<=120){run("INSERT INTO match_flow_settings(key,value) VALUES('request_minutes',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",value);changed=true;}
+if(act==='flow_guide'&&value.trim().length>0&&value.length<=1800){run("INSERT INTO match_flow_settings(key,value) VALUES('text_guide',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",value);changed=true;}
+if(act==='flow_room_notice'&&value.trim().length>0&&value.length<=1800){run("INSERT INTO match_flow_settings(key,value) VALUES('text_room_notice',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",value);changed=true;}
 if(act==='welcome_caption'&&value.trim()&&value.length<=900){run('INSERT INTO arena_settings VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',act,value);changed=true;}
 if(changed)run('INSERT INTO admin_audit(at,action,target) VALUES(?,?,?)',Date.now(),act,String(q.get('id')||'설정').slice(0,100));
 db.exec('COMMIT');}catch(e){db.exec('ROLLBACK');adminPage(res,'<section>저장 실패. <a href="/admin">돌아가기</a></section>',500);return true;}
@@ -221,6 +229,13 @@ sendForm('tg_send',field('phone','국가번호 포함 전화번호','tel','+8210
 (a.stage?sendForm('tg_cancel','','인증 취소'):'')+'</section><section><h2>기존 세션 등록</h2><p>운영자 본인이 생성한 GramJS StringSession만 등록하세요. 등록되면 암호화하여 서버 DB에 저장합니다.</p>'+sendForm('tg_session','<label>StringSession<textarea name="session" maxlength="20000" rows="3" required autocomplete="off" placeholder="1..."></textarea></label>','세션 연결')+'</section>';
 content+='<section><h2>자동 생성 대전방</h2><p>등록된 사용자 계정으로 신규 비공개 그룹 생성 및 기존 봇 관리자 등록을 요청합니다.</p>'+table(['코드','생성자','그룹 ID','상태','오류'],all('SELECT * FROM generated_rooms ORDER BY created DESC LIMIT 30').map(r=>tr([r.code,r.owner,r.chat||'-',r.status,r.error||'-'])))+'</section>';
 }
+if(tab==='requests'){
+const rows=all('SELECT * FROM match_requests ORDER BY created DESC LIMIT 50 OFFSET ?',offset);
+content='<section><h2>대전 신청 현황</h2><p>상대 확인, 신청 수락, 그룹 생성, 양측 준비 상태를 확인할 수 있습니다. 기존 경기 데이터는 보존됩니다.</p>'+table(['코드','생성자','상대방','종목','방식','상태','공지 A/B','준비 A/B','관리'],rows.map(r=>tr([r.code,r.owner,r.guest||'-',r.game+' · '+r.rounds+'판',modes[r.mode],r.status,r.notice_owner+'/'+r.notice_guest,r.ready_owner+'/'+r.ready_guest],'<td>'+(!['finished','cancelled','expired'].includes(r.status)?form('mr_cancel','', '<input type="hidden" name="code" value="'+esc(r.code)+'">','중단'):'-')+'</td>')))+paging()+'</section>'+
+'<section><h2>대전 자동 진행 설정</h2><p>신청 수락 대기 시간(5~120분)</p>'+form('flow_minutes','', '<input type="number" name="value" min="5" max="120" value="'+esc(matchFlow.config('request_minutes','60'))+'">','저장')+'</section>'+
+'<section><h2>이용 안내 문구</h2>'+form('flow_guide','', '<textarea name="value" rows="9" maxlength="1800" required>'+esc(matchFlow.config('text_guide','📖 GLORY ARENA 이용 안내\n1. 상대를 지정하거나 대기실에서 신청\n2. 상대방 수락\n3. 전용 비공개 그룹 생성\n4. 양측 준비 완료\n5. 공식 이모지 게임으로 대전\n모든 대전은 무료입니다.'))+'</textarea>','문구 저장')+'</section>'+
+'<section><h2>전용 그룹 공지 문구</h2>'+form('flow_room_notice','', '<textarea name="value" rows="9" maxlength="1800" required>'+esc(matchFlow.config('text_room_notice','📌 GLORY ARENA 경기 안내\n\n두 참가자 모두 공지를 확인하고 준비 완료를 눌러주세요.\n모든 대전은 무료입니다.'))+'</textarea>','문구 저장')+'</section>';
+}
 if(tab==='audit'){const rows=all('SELECT * FROM admin_audit ORDER BY id DESC LIMIT 50 OFFSET ?',offset);const names={block:'회원 제한',unblock:'회원 제한 해제',note:'회원 메모',room_enable:'방 활성화',room_disable:'방 중단',cancel:'대기 경기 취소',game:'게임 설정',matches_enabled:'신규 매치 설정',welcome_caption:'시작 문구 수정'};content='<section><h2>관리자 변경 기록</h2>'+table(['시간','작업','대상'],rows.map(r=>tr([date(r.at),names[r.action]||r.action,r.target])))+paging()+'</section>';}
 const nav=Object.entries(sections).map(([k,v])=>'<a class="'+(k===tab?'selected':'')+'" href="/admin?tab='+k+'">'+v+'</a>').join('');
 adminPage(res,'<header><div><h1>GLORY ARENA</h1><small>운영 관리 센터</small></div><form method="post" action="/admin/logout"><button>로그아웃</button></form></header><div class="layout"><nav>'+nav+'</nav><article><h2 class="page-title">'+sections[tab]+'</h2>'+(url.searchParams.has('saved')?'<section>'+ (url.searchParams.get('saved')==='1'?'저장되었습니다.':'변경되지 않았습니다. 상태 또는 입력값을 확인하세요.')+'</section>':'')+content+'</article></div>');return true;
@@ -238,4 +253,4 @@ webhookReady=true;console.log('Webhook update accepted',u.update_id);res.writeHe
 }catch(e){console.error('Webhook processing failed',e.name);res.writeHead(500).end();}
 });
 server.listen(port,'0.0.0.0',()=>{console.log('GLORY ARENA HTTP server listening on',port);void register();});
-setInterval(()=>{void drain();void roomService.work();},5000).unref();
+setInterval(()=>{void drain();void roomService.work();roomService.recover();matchFlow.tick();},5000).unref();
