@@ -49,7 +49,7 @@ export function createMatchFlow(db, send, roomService, games, modes, rounds, opt
   function groupReady(code,room){const r=get(code);if(!r||r.status!=='room_pending'||!room?.chat||!room?.linkOwner||!room?.linkGuest)return;
     const id=Number(run("INSERT INTO matches(chat,owner,guest,game,mode,rounds,state) VALUES(?,?,?,?,?,?,'waiting')",room.chat,r.owner,r.guest,r.game,r.mode,r.rounds).lastInsertRowid);
     run("UPDATE match_requests SET status='room_ready',room_code=COALESCE(room_code,?),match_id=?,updated=? WHERE code=?",room.code,id,Date.now(),code);
-    send(room.chat,text('room_notice','📌 GLORY ARENA 경기 안내\n\n양측 모두 공지 확인 후 준비 완료를 눌러주세요.\n입금, 보증금, 수수료 없이 진행되는 무료 대전입니다.\n승패는 공식 텔레그램 이모지 결과로 기록됩니다.')+'\n\n매치: '+code+'\n'+r.game+' '+r.rounds+'판',[[btn('✅ 공지 확인','mf:notice:'+code)],[btn('🎮 준비 완료','mf:ready:'+code)]]);
+    send(room.chat,text('room_notice','📌 GLORY ARENA 경기 안내\n\n양측 모두 공지 확인 후 준비 완료를 눌러주세요.\n입금, 보증금, 수수료 없이 진행되는 무료 대전입니다.\n승패는 공식 텔레그램 이모지 결과로 기록됩니다.')+'\n\n매치: '+code+'\n'+r.game+' '+r.rounds+'판',[[btn('✅ 공지 확인','mf:notice:'+code)],[btn('🎮 준비 완료','mf:ready:'+code)],[btn('🛑 중도 종료 요청','mf:stop:'+code)]]);
     send(r.owner,'🚪 '+code+' 전용 그룹 입장 링크입니다.\n진행 안내와 공지 확인은 그룹 안에서 이루어집니다.',[[{text:'🚪 그룹 입장',url:room.linkOwner}]]);
     send(r.guest,'🚪 '+code+' 전용 그룹 입장 링크입니다.\n진행 안내와 공지 확인은 그룹 안에서 이루어집니다.',[[{text:'🚪 그룹 입장',url:room.linkGuest}]]);
   }
@@ -106,6 +106,7 @@ export function createMatchFlow(db, send, roomService, games, modes, rounds, opt
     if(votesFor(code)?.state==='closing')return true;
     scheduleStop(r,'admin');return true;
   }
+  function stopByChat(user,chat){const r=byChat(chat);if(!r){send(chat,'진행 중인 대전방이 아닙니다.');return;}requestStop(user,chat,r.code);}
   function onCallback(user,chat,p){if(p[0]!=='mf')return false;const op=p[1],code=p[2],r=code?get(code):null;
     if(op==='home'){sendMain(user);return true;}if(op==='help'){tutorial(user);return true;}if(op==='begin'){begin(user);return true;}if(op==='input_cancel'){run('DELETE FROM match_inputs WHERE user_id=?',user);sendMain(user);return true;}
     if(op==='lobby'){lobby(user);return true;}if(op==='mine'){mine(user);return true;}if(op==='public'){createPublic(user);return true;}
@@ -194,5 +195,5 @@ export function createMatchFlow(db, send, roomService, games, modes, rounds, opt
   }
 
   function cancelForAdmin(code){const r=get(code);if(!r||['finished','cancelled','expired'].includes(r.status))return false;run("UPDATE match_requests SET status='cancelled',updated=? WHERE code=?",Date.now(),code);if(r.match_id)run("UPDATE matches SET state='cancelled' WHERE id=? AND state!='finished'",r.match_id);send(r.owner,'운영자에 의해 대전이 중단됐습니다: '+code);if(r.guest)send(r.guest,'운영자에 의해 대전이 중단됐습니다: '+code);return true;}
-  return {sendMain,tutorial,begin,lobby,mine,onText,onCallback,tick,finished,cancelForAdmin,forceCloseForAdmin,get,config,votesFor,stopFor,processClose};
+  return {sendMain,tutorial,begin,lobby,mine,onText,onCallback,tick,finished,cancelForAdmin,forceCloseForAdmin,stopByChat,get,config,votesFor,stopFor,processClose};
 }
