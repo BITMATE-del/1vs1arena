@@ -15,7 +15,8 @@ const fakeRoom={
   getByCode:code=>rooms.get(code),
   finish:code=>{const r=rooms.get(code);if(r)r.status='finished';},
   reopen:code=>{const r=rooms.get(code);if(r)r.status='ready';},
-  close:async code=>{const r=rooms.get(code);if(r)r.status='closed';return true;}
+  close:async code=>{const r=rooms.get(code);if(r)r.status='closed';return true;},
+  freshInvite:async (code,role)=>'https://t.me/+recovery_'+role
 };
 const matchStarts=[],matchStops=[];
 const flow=createMatchFlow(db,send,fakeRoom,{'🎲':['다이스',6],'🎯':['다트',6]},{wins:'선승제',round:'매판 승패'},[1,3,5],{gameEnabled:()=>true,onMatchStart:id=>matchStarts.push(id),onMatchStopped:id=>matchStops.push(id)});
@@ -116,6 +117,12 @@ events.get(forceRoom).onReady(force.code,{chat:-10012001200,code:forceRoom,linkO
 const forceMatch=get().match_id;
 db.prepare("UPDATE match_requests SET status='playing' WHERE code=?").run(force.code);
 db.prepare("UPDATE matches SET state='active',turn=? WHERE id=?").run(1001,forceMatch);
+await flow.resume(1001,force.code);
+assert(messages.some(m=>m.user===1001&&m.keyboard?.flat().some(k=>k.url==='https://t.me/+recovery_owner')),'authorized owner receives fresh group link after reconnect');
+await flow.resume(1002,force.code);
+assert(messages.some(m=>m.user===1002&&m.keyboard?.flat().some(k=>k.url==='https://t.me/+recovery_guest')),'guest can rejoin independently');
+await flow.resume(9999,force.code);
+assert(messages.some(m=>m.user===9999&&m.message.includes('재입장할 수 있는')),'non participant cannot access a room invite');
 assert.equal(flow.forceCloseForAdmin(force.code),true,'admin can force group shutdown mid-game');
 assert.deepEqual(matchStops,[forceMatch],'forcing an active match refreshes the stopped scoreboard');
 assert.equal(db.prepare('SELECT state FROM matches WHERE id=?').get(forceMatch).state,'cancelled');
