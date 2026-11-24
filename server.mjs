@@ -77,14 +77,11 @@ const entry=one('SELECT expires FROM welcome_banner_tokens WHERE hash=?',hash);
 if(!entry||entry.expires<Date.now()){send(m.chat.id,'시작 이미지 등록 코드가 만료되었거나 올바르지 않습니다. 관리자 화면에서 새 코드를 발급받으세요.');return true;}
 const photo=m.photo.at(-1).file_id;
 if(typeof photo!=='string'||photo.length<5)return false;
-db.exec('BEGIN IMMEDIATE');
-try{
-  const deleted=run('DELETE FROM welcome_banner_tokens WHERE hash=? AND expires>=?',hash,Date.now()).changes;
-  if(!deleted){db.exec('ROLLBACK');send(m.chat.id,'등록 코드가 이미 사용되었습니다.');return true;}
-  run('DELETE FROM welcome_banner_tokens');
-  run("INSERT INTO welcome_settings(key,value) VALUES('photo',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",photo);
-  db.exec('COMMIT');
-}catch(e){db.exec('ROLLBACK');throw e;}
+// handle() already runs inside the webhook transaction. Do not open a nested transaction.
+const deleted=run('DELETE FROM welcome_banner_tokens WHERE hash=? AND expires>=?',hash,Date.now()).changes;
+if(!deleted){send(m.chat.id,'등록 코드가 이미 사용되었습니다.');return true;}
+run('DELETE FROM welcome_banner_tokens');
+run("INSERT INTO welcome_settings(key,value) VALUES('photo',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",photo);
 console.log('Welcome image replaced through one-time admin registration code');
 send(m.chat.id,'✅ 새 봇의 시작 이미지가 등록되었습니다.\n아래 /start를 눌러 시작 화면을 확인하세요.');
 menu(m.chat.id);return true;
@@ -317,7 +314,7 @@ try{let size=0;const chunks=[];for await(const chunk of req){size+=chunk.length;
 const u=JSON.parse(Buffer.concat(chunks).toString('utf8'));if(!Number.isSafeInteger(u.update_id)){res.writeHead(400).end();return;}
 db.exec('BEGIN IMMEDIATE');try{const inserted=run('INSERT OR IGNORE INTO updates(id) VALUES(?)',u.update_id).changes;if(inserted)handle(u);db.exec('COMMIT');}catch(e){db.exec('ROLLBACK');throw e;}
 webhookReady=true;console.log('Webhook update accepted',u.update_id);res.writeHead(200).end('OK');void drain();
-}catch(e){console.error('Webhook processing failed',e.name);res.writeHead(500).end();}
+}catch(e){console.error('Webhook processing failed',e?.name||'Error',String(e?.message||'unknown').slice(0,180));res.writeHead(500).end();}
 });
 server.listen(port,'0.0.0.0',()=>{console.log('GLORY ARENA HTTP server listening on',port);void register();});
 setInterval(()=>{void drain();void roomService.work();roomService.recover();matchFlow.tick();matchWatch.sync();matchWatch.tick();},5000).unref();
