@@ -3,6 +3,7 @@ import { createHash, timingSafeEqual } from 'node:crypto';
 import { createTelegramAuth } from './telegram-auth.mjs';
 import { createRoomService } from './rooms.mjs';
 import { createMatchFlow } from './match-flow.mjs';
+import { createMatchBoard } from './match-board.mjs';
 import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
@@ -40,11 +41,11 @@ function roomDisabled(id){return one('SELECT enabled FROM arena_rooms WHERE id=?
 function gameEnabled(g){return setting('game:'+g,'1')==='1';}
 
 db.exec("CREATE TABLE IF NOT EXISTS dice_button_pending(match INTEGER PRIMARY KEY, player INTEGER NOT NULL, round INTEGER NOT NULL, requested INTEGER NOT NULL)");
-function turnButton(m){return [[button(m.game+' '+(games[m.game]?.[0]||'게임')+' 굴리기','dice:'+m.id)]];}
+function turnButton(m){const id=m.turn===m.owner?m.owner:m.guest;const u=one('SELECT name,username FROM arena_users WHERE id=?',id);const label=u?.username?'@'+u.username:(u?.name||'참가자').slice(0,24);return [[button(m.game+' '+label.slice(0,22)+' 굴리기','dice:'+m.id)]];}
 function queueDiceButton(chat,user,id){
 const m=one("SELECT * FROM matches WHERE id=? AND chat=? AND state='active'",id,chat);
-if(!m){send(chat,'현재 진행 중인 경기가 아닙니다.');return;}
-if(m.turn!==user){send(chat,'지금은 본인 차례가 아닙니다.');return;}
+if(!m){return;}
+if(m.turn!==user){return;}
 const inserted=run('INSERT OR IGNORE INTO dice_button_pending(match,player,round,requested) VALUES(?,?,?,?)',m.id,user,m.round,Date.now());
 if(!inserted.changes){return;}
 enqueue('sendDice',{chat_id:chat,emoji:m.game,_arena_match:m.id,_arena_actor:user,_arena_round:m.round});
@@ -85,19 +86,19 @@ for(const m of rows)send(chat,'#'+m.id+' '+m.game+' '+games[m.game]?.[0]+' | '+m
 }
 function action(chat,user,id,op){const m=one('SELECT * FROM matches WHERE id=? AND chat=?',id,chat);if(!m){send(chat,'존재하지 않는 경기입니다.');return;}
 if(op==='join'&&m.state==='waiting'&&user!==m.owner){run("UPDATE matches SET guest=?,state='requested' WHERE id=?",user,id);send(chat,'신청 완료. 개설자 수락 대기 중입니다.',[[button('수락','accept:'+id),button('거절','reject:'+id)]]);return;}
-if(op==='accept'&&m.state==='requested'&&user===m.owner){if(one("SELECT 1 FROM matches WHERE chat=? AND state='active' AND (owner IN (?,?) OR guest IN (?,?))",chat,user,m.guest,user,m.guest)){send(chat,'참가자가 다른 경기 진행 중입니다.');return;}run("UPDATE matches SET state='active',turn=owner WHERE id=?",id);send(chat,'경기 시작! 개설자부터 '+m.game+' 게임 버튼을 누르세요. (ID '+user+')',turnButton(m));return;}
+if(op==='accept'&&m.state==='requested'&&user===m.owner){if(one("SELECT 1 FROM matches WHERE chat=? AND state='active' AND (owner IN (?,?) OR guest IN (?,?))",chat,user,m.guest,user,m.guest)){send(chat,'참가자가 다른 경기 진행 중입니다.');return;}run("UPDATE matches SET state='active',turn=owner WHERE id=?",id);matchBoard.queueMatch(id);return;}
 if(op==='reject'&&m.state==='requested'&&user===m.owner){run("UPDATE matches SET guest=NULL,state='waiting' WHERE id=?",id);send(chat,'신청 거절. 다시 대기 중입니다.');return;}
 if(op==='cancel'&&['waiting','requested'].includes(m.state)&&user===m.owner){run("UPDATE matches SET state='cancelled' WHERE id=?",id);send(chat,'매치 취소 완료.');return;}send(chat,'현재 상태 또는 권한으로 실행할 수 없습니다.');}
 function roll(m){const {chat,from,dice,message_id}=m;const user=from.id,cid=chat.id,g=dice.emoji,v=dice.value;
 if(!games[g]||!Number.isInteger(v)||v<1||v>games[g][1]||one('SELECT 1 FROM rolls WHERE chat=? AND message=?',cid,message_id))return;
 const row=one("SELECT * FROM matches WHERE chat=? AND state='active' AND turn=? AND game=?",cid,user,g);if(!row)return;
 const id=row.id,r=row.round;run('INSERT INTO rolls VALUES(?,?,?,?,?,?)',cid,message_id,id,r,user,v);run('DELETE FROM dice_button_pending WHERE match=?',id);
-if(user===row.owner){run('UPDATE matches SET turn=guest WHERE id=?',id);send(cid,r+'라운드 개설자: '+v+'점. 상대방 차례입니다. (ID '+row.guest+')',turnButton(row));return;}
+if(user===row.owner){run('UPDATE matches SET turn=guest WHERE id=?',id);matchBoard.queueMatch(id);return;}
 const av=one('SELECT value FROM rolls WHERE match=? AND round=? AND player=?',id,r,row.owner).value;
 let a=row.a,b=row.b;if(row.mode==='total'){a+=av;b+=v;}else{a+=Number(av>v);b+=Number(v>av);}
 const done=r>=row.rounds||(row.mode==='wins'&&Math.max(a,b)>=Math.floor(row.rounds/2)+1);
 run('UPDATE matches SET a=?,b=?,state=?,round=?,turn=? WHERE id=?',a,b,done?'finished':'active',done?r:r+1,done?null:row.owner,id);
-send(cid,r+'라운드: '+av+' : '+v+'\n누적 '+a+' : '+b+'\n'+(done?'경기 종료 — '+(a===b?'무승부':a>b?'개설자 승리':'신청자 승리'):'다음 라운드: 개설자 차례'),done?undefined:turnButton(row));if(done)matchFlow.finished(cid);}
+matchBoard.queueMatch(id);if(done)matchFlow.finished(cid);}
 function handle(u){track(u);const actor=u.callback_query?.from||u.message?.from;const chat=u.callback_query?.message?.chat||u.message?.chat;if(actor&&blocked(actor.id)){if(u.callback_query)enqueue('answerCallbackQuery',{callback_query_id:u.callback_query.id,text:'이용이 제한된 계정입니다.',show_alert:true});else if(chat?.type==='private')send(chat.id,'이용이 제한된 계정입니다.');return;}if(chat&&roomDisabled(chat.id)&&chat.type!=='private')return;const q=u.callback_query;
 if(q){const chat=q.message?.chat;if(!chat||!q.from||typeof q.data!=='string')return;const cid=chat.id,user=q.from.id,p=q.data.split(':');
 enqueue('answerCallbackQuery',{callback_query_id:q.id});
@@ -128,17 +129,18 @@ const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 async function tg(method,data){const wait=blockedUntil-Date.now();if(wait>0)await sleep(wait);
 const response=await fetch('https://api.telegram.org/bot'+token+'/'+method,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(data),signal:AbortSignal.timeout(25000)});
 let result;try{result=await response.json();}catch{result={};}
-if(!response.ok||!result.ok){const code=Number(result.error_code||response.status);if(code===429){const retry=Math.max(Number(result.parameters?.retry_after)||0,Number(response.headers.get('retry-after'))||0,120);blockedUntil=Date.now()+(retry+5)*1000;console.warn('Telegram',method,'HTTP 429; retry_after=',retry);}throw Object.assign(new Error('Telegram API error'),{code});}
+if(!response.ok||!result.ok){const code=Number(result.error_code||response.status);if(code===429){const retry=Math.max(Number(result.parameters?.retry_after)||0,Number(response.headers.get('retry-after'))||0,120);blockedUntil=Date.now()+(retry+5)*1000;console.warn('Telegram',method,'HTTP 429; retry_after=',retry);}throw Object.assign(new Error('Telegram API error'),{code,description:String(result.description||'')});}
 return result.result;}
 async function register(){for(;;){if(webhookReady)return;try{await tg('setWebhook',{url:base+'/telegram/webhook',secret_token:secret,allowed_updates:['message','callback_query'],drop_pending_updates:false,max_connections:1});webhookReady=true;lastError=null;console.log('Telegram webhook registered successfully');void drain();return;}catch(e){lastError=e.code||'network';console.warn('Webhook registration failed:',lastError);await sleep(e.code===429?Math.max(0,blockedUntil-Date.now()):120000);}}}
-async function drain(){if(busy||!webhookReady)return;busy=true;try{for(;;){const r=one('SELECT * FROM outbox ORDER BY id LIMIT 1');if(!r)break;try{const p=JSON.parse(r.payload);if(r.method==='sendDice'&&p._arena_match){const { _arena_match:matchId,_arena_actor:actor,_arena_round:expectedRound,...dicePayload}=p;const current=one("SELECT * FROM matches WHERE id=? AND chat=? AND state='active' AND turn=?",matchId,p.chat_id,actor);if(!current||current.round!==expectedRound){run('DELETE FROM dice_button_pending WHERE match=?',matchId);run('DELETE FROM outbox WHERE id=?',r.id);continue;}const result=await tg('sendDice',dicePayload);if(!result?.dice?.emoji||!Number.isInteger(result?.dice?.value)||!Number.isSafeInteger(result.message_id))throw Error('DICE_RESPONSE_INVALID');roll({chat:{id:p.chat_id},from:{id:actor},dice:result.dice,message_id:result.message_id});}else await tg(r.method,p);run('DELETE FROM outbox WHERE id=?',r.id);}catch(e){lastError=e.code||'network';console.warn('Delivery',r.method,'failed:',lastError);if(r.method==='sendDice'&&[400,403].includes(e.code)){const p=JSON.parse(r.payload);run('DELETE FROM dice_button_pending WHERE match=?',p._arena_match);send(p.chat_id,'게임 버튼 처리에 실패했습니다. 다시 눌러주세요.');}
+async function drain(){if(busy||!webhookReady)return;busy=true;try{for(;;){const r=one('SELECT * FROM outbox ORDER BY id LIMIT 1');if(!r)break;try{const p=JSON.parse(r.payload);if(r.method==='arenaBoardSync'){await matchBoard.sync(p,tg);}else if(r.method==='sendDice'&&p._arena_match){const { _arena_match:matchId,_arena_actor:actor,_arena_round:expectedRound,...dicePayload}=p;const current=one("SELECT * FROM matches WHERE id=? AND chat=? AND state='active' AND turn=?",matchId,p.chat_id,actor);if(!current||current.round!==expectedRound){run('DELETE FROM dice_button_pending WHERE match=?',matchId);run('DELETE FROM outbox WHERE id=?',r.id);continue;}const result=await tg('sendDice',dicePayload);if(!result?.dice?.emoji||!Number.isInteger(result?.dice?.value)||!Number.isSafeInteger(result.message_id))throw Error('DICE_RESPONSE_INVALID');roll({chat:{id:p.chat_id},from:{id:actor},dice:result.dice,message_id:result.message_id});}else await tg(r.method,p);run('DELETE FROM outbox WHERE id=?',r.id);}catch(e){lastError=e.code||'network';console.warn('Delivery',r.method,'failed:',lastError);if(r.method==='sendDice'&&[400,403].includes(e.code)){const p=JSON.parse(r.payload);run('DELETE FROM dice_button_pending WHERE match=?',p._arena_match);send(p.chat_id,'게임 버튼 처리에 실패했습니다. 다시 눌러주세요.');}
 if([400,403].includes(e.code)){if(r.method==='sendPhoto'){const p=JSON.parse(r.payload);enqueue('sendMessage',{chat_id:p.chat_id,text:'GLORY ARENA\n'+p.caption,reply_markup:p.reply_markup});}run('DELETE FROM outbox WHERE id=?',r.id);continue;}await sleep(e.code===429?Math.max(0,blockedUntil-Date.now()):60000);break;}}}finally{busy=false;}}
 function validSecret(req){const a=Buffer.from(String(req.headers['x-telegram-bot-api-secret-token']||''));const b=Buffer.from(secret);return a.length===b.length&&timingSafeEqual(a,b);}
 
 const adminPassword=process.env.ADMIN_PASSWORD||'';
 const telegramAuth=createTelegramAuth(db,secret,adminPassword);
 const roomService=createRoomService(db,telegramAuth,username,send);
-const matchFlow=createMatchFlow(db,send,roomService,games,modes,rounds,{gameEnabled});
+const matchBoard=createMatchBoard(db,enqueue);
+const matchFlow=createMatchFlow(db,send,roomService,games,modes,rounds,{gameEnabled,onMatchStart:id=>matchBoard.queueMatch(id)});
 const adminAttempts=new Map();
 const adminGlobalAttempts={count:0,until:0};
 const escapeHtml=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
