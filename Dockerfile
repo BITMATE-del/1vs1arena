@@ -1,5 +1,7 @@
-FROM python:3.12-slim
+FROM node:22-alpine
 WORKDIR /app
-COPY arena.py .
-ENV PYTHONUNBUFFERED=1
-CMD ["python", "arena.py"]
+COPY server.mjs .
+ENV NODE_ENV=production
+EXPOSE 3000
+RUN node --check server.mjs
+CMD ["node","server.mjs"]
