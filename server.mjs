@@ -5,7 +5,7 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 
 const token=(process.env.BOT_TOKEN||'').trim();
-const username=(process.env.BOT_USERNAME||'ValhallaBattle_bot').trim().replace(/^@/,'');
+const username=(process.env.BOT_USERNAME||'GloryArena_bot').trim().replace(/^@/,'');
 const base=(process.env.PUBLIC_URL||('https://'+(process.env.RAILWAY_PUBLIC_DOMAIN||''))).replace(/\/+$/,'');
 const port=Number(process.env.PORT||3000);
 if(!/^\d+:[\w-]+$/.test(token)) throw Error('BOT_TOKEN format invalid');
@@ -27,8 +27,8 @@ const run=(sql,...args)=>db.prepare(sql).run(...args);
 const button=(text,callback_data)=>({text,callback_data});
 function enqueue(method,payload){run('INSERT INTO outbox(method,payload) VALUES(?,?)',method,JSON.stringify(payload));}
 function send(chat,text,buttons){enqueue('sendMessage',{chat_id:chat,text,...(buttons?{reply_markup:{inline_keyboard:buttons}}:{})});}
-function menu(chat){enqueue('sendMessage',{chat_id:chat,text:'⚔ VALHALLA | 발할라\n최강자에게 허락된 전장\n아래 메뉴에서 원하는 기능을 선택하세요.\n무료 이벤트 대전',reply_markup:{keyboard:[['⚔ 매치 개설','🏛 매치 대기실'],['📖 이용 안내','🏠 메인 메뉴']],resize_keyboard:true,is_persistent:true}});}
-function groupLink(chat){send(chat,'대전은 텔레그램 그룹에서 진행합니다.',[[{text:'그룹에 발할라 추가',url:'https://t.me/'+username+'?startgroup=true'}]]);}
+function menu(chat){enqueue('sendMessage',{chat_id:chat,text:'⚔ GLORY ARENA | 글로리 아레나\n최강자에게 허락된 전장\n아래 메뉴에서 원하는 기능을 선택하세요.\n무료 이벤트 대전',reply_markup:{keyboard:[['⚔ 매치 개설','🏛 매치 대기실'],['📖 이용 안내','🏠 메인 메뉴']],resize_keyboard:true,is_persistent:true}});}
+function groupLink(chat){send(chat,'대전은 텔레그램 그룹에서 진행합니다.',[[{text:'그룹에 글로리 아레나 추가',url:'https://t.me/'+username+'?startgroup=true'}]]);}
 function choose(chat){send(chat,'게임을 선택하세요.',Object.entries(games).map(([g,v])=>[button(g+' '+v[0],'game:'+g)]).concat([[button('메인 메뉴','menu')]]));}
 function lobby(chat){const rows=all("SELECT * FROM matches WHERE chat=? AND state='waiting' ORDER BY id DESC LIMIT 20",chat);
 if(!rows.length){send(chat,'대기 중인 매치가 없습니다.',[[button('매치 개설','choose')]]);return;}
@@ -62,7 +62,7 @@ if(['join','accept','reject','cancel'].includes(p[0])&&/^\d+$/.test(p[1]||'')){a
 const m=u.message;if(!m?.from||!['private','group','supergroup'].includes(m.chat?.type))return;
 const cid=m.chat.id,t=(m.text||'').split(/\s+/)[0].split('@')[0],full=m.text||'';
 if(['/start','/help'].includes(t)||full==='🏠 메인 메뉴'){menu(cid);return;}
-if(full==='📖 이용 안내'){send(cid,'1. 그룹에 발할라 봇을 추가하세요.\n2. 매치 개설 버튼에서 게임과 조건을 선택하세요.\n3. 상대가 신청하면 개설자가 수락하세요.\n4. 차례에 맞춰 해당 이모지를 단독 전송하세요.\n모든 대전은 무료입니다.');return;}
+if(full==='📖 이용 안내'){send(cid,'1. 그룹에 글로리 아레나 봇을 추가하세요.\n2. 매치 개설 버튼에서 게임과 조건을 선택하세요.\n3. 상대가 신청하면 개설자가 수락하세요.\n4. 차례에 맞춰 해당 이모지를 단독 전송하세요.\n모든 대전은 무료입니다.');return;}
 if(t==='/create'||t==='/lobby'||['⚔ 매치 개설','🏛 매치 대기실'].includes(full)){if(m.chat.type==='private'){groupLink(cid);return;}if(t==='/create'||full==='⚔ 매치 개설')choose(cid);else lobby(cid);return;}
 if(m.new_chat_members?.some(x=>x.id===botId)){menu(cid);return;}
 if(m.chat.type!=='private'&&m.dice&&!m.forward_origin&&!m.forward_date&&!m.via_bot&&!m.sender_chat&&!m.from.is_bot)roll(m);
@@ -87,5 +87,5 @@ db.exec('BEGIN IMMEDIATE');try{const inserted=run('INSERT OR IGNORE INTO updates
 console.log('Webhook update accepted',u.update_id);res.writeHead(200).end('OK');void drain();
 }catch(e){console.error('Webhook processing failed',e.name);res.writeHead(500).end();}
 });
-server.listen(port,'0.0.0.0',()=>{console.log('VALHALLA HTTP server listening on',port);void register();});
+server.listen(port,'0.0.0.0',()=>{console.log('GLORY ARENA HTTP server listening on',port);void register();});
 setInterval(()=>void drain(),5000).unref();
