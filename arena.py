@@ -15,8 +15,12 @@ def init():
         c.execute('CREATE TABLE IF NOT EXISTS matches(id INTEGER PRIMARY KEY, chat INTEGER NOT NULL, owner INTEGER NOT NULL, guest INTEGER, game TEXT NOT NULL, mode TEXT NOT NULL, rounds INTEGER NOT NULL, state TEXT NOT NULL DEFAULT "waiting", turn INTEGER, round INTEGER NOT NULL DEFAULT 1, a INTEGER NOT NULL DEFAULT 0, b INTEGER NOT NULL DEFAULT 0)')
         c.execute('CREATE TABLE IF NOT EXISTS rolls(chat INTEGER, message INTEGER, match INTEGER, round INTEGER, player INTEGER, value INTEGER, PRIMARY KEY(chat,message), UNIQUE(match,round,player))')
 def api(method, **kw):
-    req=urllib.request.Request('https://api.telegram.org/bot'+TOKEN+'/'+method, data=json.dumps(kw).encode(),headers={'Content-Type':'application/json'})
-    with urllib.request.urlopen(req,timeout=45) as r: result=json.load(r)
+    req=urllib.request.Request('https://api.telegram.org/bot'+TOKEN+'/'+method, data=json.dumps(kw).encode(),headers={'Content-Type':'application/json','Accept':'application/json'})
+    try:
+        with urllib.request.urlopen(req,timeout=45) as r: result=json.load(r)
+    except urllib.error.HTTPError as e:
+        logging.warning('Telegram method %s returned HTTP %s',method,e.code)
+        raise
     if not result['ok']: raise RuntimeError('Telegram API error')
     return result['result']
 def send(chat,text,buttons=None):
@@ -108,10 +112,20 @@ def main():
     logging.basicConfig(level=logging.INFO)
     def retry_delay(e):
         try:
-            payload=json.loads(e.read().decode())
-            return max(60,int(payload.get('parameters',{}).get('retry_after',60))+5)
+            raw=e.read(8192)
+            content_type=e.headers.get('Content-Type','').split(';')[0]
+            try:
+                payload=json.loads(raw.decode())
+                retry=payload.get('parameters',{}).get('retry_after')
+                logging.warning('Rate-limit response: Telegram JSON=%s; API error_code=%s; retry_after=%s', isinstance(payload,dict) and payload.get('ok') is False, payload.get('error_code'), retry)
+            except (ValueError, AttributeError):
+                retry=None
+                logging.warning('Rate-limit response is not Bot API JSON; content type=%s', content_type)
+            header=e.headers.get('Retry-After','')
+            header_delay=int(header) if header.isdigit() else 0
+            return max(120,int(retry or 0)+5,header_delay+5)
         except Exception:
-            return 65
+            return 120
     while True:
         try:
             identity=api('getMe')
