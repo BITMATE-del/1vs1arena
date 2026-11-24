@@ -1,3 +1,4 @@
+import { gameInstructions, GAME_TITLES } from './game-emojis.mjs';
 export function createMatchBoard(db, enqueue) {
   db.exec("CREATE TABLE IF NOT EXISTS match_boards(chat INTEGER PRIMARY KEY,match INTEGER NOT NULL,message INTEGER,updated INTEGER NOT NULL DEFAULT 0)");
   const one=(sql,...args)=>db.prepare(sql).get(...args);
@@ -36,7 +37,7 @@ export function createMatchBoard(db, enqueue) {
     text+='\n';
     if(active){
       text+='🔴 현재 차례: '+label+'\n';
-      text+='👉 '+label+' 님이 채팅 입력창에서 '+m.game+' 공식 게임을 직접 보내주세요.\n';
+      text+='👉 '+label+' 님이 '+m.game+' '+(GAME_TITLES[m.game]||'게임')+' 공식 애니메이션을 직접 보내주세요.\n';
       text+='📍 진행 라운드 '+m.round+' / '+m.rounds;
     }else if(m.state==='finished'){
       text+='🏆 경기 종료\n';
@@ -48,7 +49,7 @@ export function createMatchBoard(db, enqueue) {
   function queue(chat){const m=one("SELECT * FROM matches WHERE chat=? AND state IN ('active','finished') ORDER BY id DESC LIMIT 1",chat);if(m)enqueue('arenaBoardSync',{chat_id:chat,match_id:m.id});}
   function queueMatch(id){const m=one('SELECT chat FROM matches WHERE id=?',id);if(m)enqueue('arenaBoardSync',{chat_id:m.chat,match_id:id});}
   async function sendUserKeyboard(chat,m,tg){
-    await tg('sendMessage',{chat_id:chat,text:'🎮 '+player(m.turn)+' 님 차례입니다.\\n아래 '+m.game+' 버튼은 회원 본인 계정에서 전송됩니다.\\n공식 애니메이션 결과만 점수로 인정하며, 일반 텍스트 이모지는 점수로 처리되지 않습니다.',reply_markup:{keyboard:[[{text:m.game}]],resize_keyboard:true,is_persistent:true,one_time_keyboard:false}});
+    await tg('sendMessage',{chat_id:chat,text:'👤 '+player(m.turn)+' 님부터 시작합니다.\n\n'+gameInstructions(m.game),reply_markup:{keyboard:[[{text:m.game}]],resize_keyboard:true,is_persistent:true,one_time_keyboard:false}});
   }
   async function sync(payload,tg){
     const chat=payload.chat_id;
