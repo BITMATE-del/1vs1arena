@@ -5,7 +5,7 @@ import { StringSession } from 'telegram/sessions/index.js';
 export function createTelegramAuth(db, secret, adminPassword) {
   const apiId=Number(process.env.TELEGRAM_API_ID), apiHash=process.env.TELEGRAM_API_HASH||'';
   const creds={apiId, apiHash};
-  const configured=Number.isSafeInteger(apiId)&&apiId>0&&!!apiHash;
+  const configured=Number.isSafeInteger(apiId)&&apiId>0&&/^[a-fA-F0-9]{32}$/.test(apiHash.trim());
   const key=createHash('sha256').update(secret+':telegram-session:'+adminPassword).digest();
   db.exec("CREATE TABLE IF NOT EXISTS telegram_account_session(id INTEGER PRIMARY KEY CHECK(id=1), encrypted TEXT NOT NULL, user_id TEXT NOT NULL, name TEXT NOT NULL, username TEXT NOT NULL, saved_at INTEGER NOT NULL)");
   let pending=null;
@@ -26,6 +26,30 @@ export function createTelegramAuth(db, secret, adminPassword) {
   async function verify(){const row=current();if(!row)throw Error('NOT_CONNECTED');if(!configured)throw Error('API_MISSING');const client=await clientWith(unseal(row.encrypted));try{const data=await persist(client);return data;}finally{await client.disconnect().catch(()=>{});}}
   async function disconnect(){await closePending();db.prepare('DELETE FROM telegram_account_session WHERE id=1').run();lastError='';return info();}
   async function cancel(){await closePending();return info();}
-  function error(e){const msg=String(e?.errorMessage||e?.message||'');const known=['PHONE_INVALID','PHONE_NUMBER_INVALID','PHONE_CODE_INVALID','PHONE_CODE_EXPIRED','PASSWORD_HASH_INVALID','SESSION_PASSWORD_NEEDED','LOGIN_EXPIRED','API_MISSING','SESSION_INVALID','USER_REQUIRED','UNAUTHORIZED','NOT_CONNECTED','TOO_MANY_ATTEMPTS','PASSWORD_INVALID','CODE_INVALID','API_ID_INVALID'];const kind=known.find(x=>msg.includes(x))||(msg.includes('FLOOD_WAIT')?'FLOOD_WAIT':msg.includes('TIMEOUT')||msg.includes('ECONN')?'NETWORK_ERROR':'TELEGRAM_ERROR');console.warn('Telegram authentication request failed:',kind);lastError=kind;return kind;}
+  function error(e){
+    const msg=String(e?.errorMessage||e?.message||'');
+    const codes=[
+      'PHONE_INVALID','PHONE_NUMBER_INVALID','PHONE_NUMBER_BANNED','PHONE_NUMBER_FLOOD',
+      'PHONE_CODE_INVALID','PHONE_CODE_EXPIRED','PHONE_CODE_HASH_INVALID',
+      'PASSWORD_HASH_INVALID','SESSION_PASSWORD_NEEDED','LOGIN_EXPIRED',
+      'API_MISSING','API_ID_INVALID','API_ID_PUBLISHED_FLOOD','AUTH_RESTART',
+      'SESSION_INVALID','USER_REQUIRED','UNAUTHORIZED','NOT_CONNECTED',
+      'TOO_MANY_ATTEMPTS','PASSWORD_INVALID','CODE_INVALID',
+      'PHONE_PASSWORD_FLOOD','SEND_CODE_UNAVAILABLE'
+    ];
+    const kind=codes.find(x=>msg.includes(x))||
+      (/FLOOD_WAIT/i.test(msg)?'FLOOD_WAIT':
+      /timeout|timed out|ECONN|ETIMEDOUT|ENETUNREACH|connection/i.test(msg)?'NETWORK_ERROR':
+      /Invalid api|api hash|API hash|must be.*api/i.test(msg)?'API_ID_INVALID':
+      'TELEGRAM_ERROR');
+    lastError=kind;
+    // A sanitized technical diagnostic — never log authentication codes, passwords,
+    // phone numbers, saved sessions, or full exception objects.
+    const safeName=String(e?.name||'Unknown').replace(/[^a-zA-Z0-9_]/g,'').slice(0,50);
+    const safeCode=String(e?.code||'').replace(/[^a-zA-Z0-9_-]/g,'').slice(0,20);
+    const technical=msg.replace(/\+?\d{8,}/g,'[redacted]').replace(/[A-Fa-f0-9]{32,}/g,'[redacted]').replace(/[^a-zA-Z0-9 :._()[\]-]/g,'').slice(0,120);
+    console.warn('Telegram authentication error',{kind,name:safeName,code:safeCode,detail:technical});
+    return kind;
+  }
   return {info,start,code,password,registerSession,verify,disconnect,cancel,error};
 }
