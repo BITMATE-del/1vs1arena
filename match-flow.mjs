@@ -12,7 +12,7 @@ export function createMatchFlow(db, send, roomService, games, modes, rounds, opt
   const mins=()=>Math.max(5,Math.min(120,Number(config('request_minutes','60'))||60));
   db.exec("CREATE TABLE IF NOT EXISTS match_continue_votes(code TEXT PRIMARY KEY, owner_vote TEXT, guest_vote TEXT, deadline INTEGER NOT NULL, close_after INTEGER, state TEXT NOT NULL DEFAULT 'voting', last_error TEXT, updated INTEGER NOT NULL)");
   const votesFor=code=>one("SELECT * FROM match_continue_votes WHERE code=?",code);
-  const finishMsg=(code,room)=>'🏆 경기가 종료되었습니다.\\n\\n매치 코드: '+code+'\\n\\n추가 경기를 계속 진행하시겠습니까?\\n양쪽 참가자 모두 선택해 주세요. 두 명 모두 예를 선택하면 같은 그룹에서 새 경기를 시작합니다.\\n아니오를 선택한 회원이 있으면 양쪽 응답 확인 후 그룹이 종료됩니다.';
+  const finishMsg=(code,room)=>'🏆 경기가 종료되었습니다.\n\n매치 코드: '+code+'\n\n추가 경기를 계속 진행하시겠습니까?\n양쪽 참가자 모두 선택해 주세요. 두 명 모두 예를 선택하면 같은 그룹에서 새 경기를 시작합니다.\n아니오를 선택한 회원이 있으면 양쪽 응답 확인 후 그룹이 종료됩니다.';
 
   const name=id=>{const u=one('SELECT name,username FROM arena_users WHERE id=?',id);return u?.username?'@'+u.username:u?.name||String(id);};
   const btn=(label,code)=>({text:label,callback_data:code});
@@ -107,7 +107,7 @@ export function createMatchFlow(db, send, roomService, games, modes, rounds, opt
     run("UPDATE match_continue_votes SET "+col+"=?,updated=? WHERE code=? AND state='voting'",vote,Date.now(),code);
     const now=votesFor(code);
     if(!now.owner_vote||!now.guest_vote){
-      send(chat,'✅ '+name(user)+' 님 응답 완료 ('+(vote==='yes'?'계속':'종료')+').\\n상대방 응답을 기다리고 있습니다.');
+      send(chat,'✅ '+name(user)+' 님 응답 완료 ('+(vote==='yes'?'계속':'종료')+').\n상대방 응답을 기다리고 있습니다.');
       return;
     }
     if(now.owner_vote==='yes'&&now.guest_vote==='yes'){
@@ -117,7 +117,7 @@ export function createMatchFlow(db, send, roomService, games, modes, rounds, opt
       run("UPDATE match_requests SET status='playing',match_id=?,updated=? WHERE code=?",next,Date.now(),code);
       run("UPDATE match_continue_votes SET state='rematched',updated=? WHERE code=?",Date.now(),code);
       roomService.reopen(r.room_code);
-      send(chat,'⚔️ 양쪽 모두 추가 경기에 동의했습니다!\\n\\n'+code+' · '+r.game+' · '+r.rounds+'판\\n새 경기의 점수는 0:0으로 시작하고, 이전 경기 기록은 보관됩니다.\\n'+name(r.owner)+' 님 차례입니다.',[[btn(r.game+' '+(games[r.game]?.[0]||'게임')+' 굴리기','dice:'+next)]]);
+      send(chat,'⚔️ 양쪽 모두 추가 경기에 동의했습니다!\n\n'+code+' · '+r.game+' · '+r.rounds+'판\n새 경기의 점수는 0:0으로 시작하고, 이전 경기 기록은 보관됩니다.\n'+name(r.owner)+' 님 차례입니다.',[[btn(r.game+' '+(games[r.game]?.[0]||'게임')+' 굴리기','dice:'+next)]]);
       return;
     }
     closeDecision(r,'declined');
@@ -126,7 +126,7 @@ export function createMatchFlow(db, send, roomService, games, modes, rounds, opt
     const v=votesFor(r.code);if(!v||v.state!=='voting')return;
     const now=Date.now();
     run("UPDATE match_continue_votes SET state='closing',close_after=?,updated=? WHERE code=? AND state='voting'",now+15000,now,r.code);
-    send(roomService.getByCode(r.room_code)?.chat||r.owner,reason==='timeout'?'⌛ 추가 경기 응답 시간이 만료되었습니다. 대전방을 종료합니다.':'✅ 추가 경기를 진행하지 않기로 했습니다.\\n대전방을 종료합니다.\\n기존 경기 결과는 내 전적에 저장되어 있습니다.');
+    send(roomService.getByCode(r.room_code)?.chat||r.owner,reason==='timeout'?'⌛ 추가 경기 응답 시간이 만료되었습니다. 대전방을 종료합니다.':'✅ 추가 경기를 진행하지 않기로 했습니다.\n대전방을 종료합니다.\n기존 경기 결과는 내 전적에 저장되어 있습니다.');
   }
   const closingInProgress=new Set();
   async function processClose(code){
