@@ -12,6 +12,8 @@ export function createMatchFlow(db, send, roomService, games, modes, rounds, opt
   const mins=()=>Math.max(5,Math.min(120,Number(config('request_minutes','60'))||60));
   db.exec("CREATE TABLE IF NOT EXISTS match_continue_votes(code TEXT PRIMARY KEY, owner_vote TEXT, guest_vote TEXT, deadline INTEGER NOT NULL, close_after INTEGER, state TEXT NOT NULL DEFAULT 'voting', last_error TEXT, updated INTEGER NOT NULL)");
   const votesFor=code=>one("SELECT * FROM match_continue_votes WHERE code=?",code);
+  db.exec("CREATE TABLE IF NOT EXISTS match_stop_requests(code TEXT PRIMARY KEY, requested_by INTEGER NOT NULL, expires INTEGER NOT NULL, state TEXT NOT NULL DEFAULT 'pending', updated INTEGER NOT NULL)");
+  const stopFor=code=>one('SELECT * FROM match_stop_requests WHERE code=?',code);
   const finishMsg=(code,room)=>'🏆 경기가 종료되었습니다.\n\n매치 코드: '+code+'\n\n추가 경기를 계속 진행하시겠습니까?\n양쪽 참가자 모두 선택해 주세요. 두 명 모두 예를 선택하면 같은 그룹에서 새 경기를 시작합니다.\n아니오를 선택한 회원이 있으면 양쪽 응답 확인 후 그룹이 종료됩니다.';
 
   const name=id=>{const u=one('SELECT name,username FROM arena_users WHERE id=?',id);return u?.username?'@'+u.username:u?.name||String(id);};
@@ -63,6 +65,47 @@ export function createMatchFlow(db, send, roomService, games, modes, rounds, opt
     if(current.ready_owner&&current.ready_guest){run("UPDATE match_requests SET status='playing',updated=? WHERE code=?",Date.now(),code);run("UPDATE matches SET state='active',turn=owner WHERE id=? AND state='waiting'",current.match_id);const room=roomService.getByCode(current.room_code);if(room?.chat)options.onMatchStart?.(current.match_id);}
     else send(chat,'✅ '+name(user)+' 님 준비 완료. 상대방 준비를 기다리고 있습니다.');
   }
+  function requestStop(user,chat,code){
+    const r=get(code),room=r?.room_code?roomService.getByCode(r.room_code):null;
+    if(!r||room?.chat!==chat||![r.owner,r.guest].includes(user)||!['room_ready','playing'].includes(r.status)){send(chat,'진행 중인 대전방에서만 종료를 요청할 수 있습니다.');return;}
+    const previous=stopFor(code),now=Date.now();
+    if(previous?.state==='pending'&&previous.expires>now){
+      if(previous.requested_by===user){send(chat,'이미 상대방의 종료 동의를 기다리고 있습니다.');return;}
+      approveStop(user,chat,code,'yes');return;
+    }
+    run("INSERT INTO match_stop_requests(code,requested_by,expires,state,updated) VALUES(?,?,?,'pending',?) ON CONFLICT(code) DO UPDATE SET requested_by=excluded.requested_by,expires=excluded.expires,state='pending',updated=excluded.updated",code,user,now+5*60000,now);
+    const other=user===r.owner?r.guest:r.owner;
+    send(chat,'🛑 대전 중도 종료 요청\n\n요청자: '+name(user)+'\n상대방: '+name(other)+'\n매치 코드: '+code+'\n\n상대방이 동의하면 경기를 중단하고 방을 종료합니다.\n진행 중 경기 결과는 승패로 확정하지 않습니다.\n5분 동안 응답이 없으면 요청이 취소됩니다.',[[btn('✅ 종료 동의','mf:stopanswer:'+code+':yes'),btn('❌ 종료 거절','mf:stopanswer:'+code+':no')]]);
+  }
+  function approveStop(user,chat,code,answer){
+    const r=get(code),room=r?.room_code?roomService.getByCode(r.room_code):null,v=stopFor(code);
+    if(!r||!v||v.state!=='pending'||room?.chat!==chat||!['room_ready','playing'].includes(r.status)||!v.requested_by||user===v.requested_by||![r.owner,r.guest].includes(user))return;
+    if(Date.now()>v.expires){run("UPDATE match_stop_requests SET state='expired',updated=? WHERE code=?",Date.now(),code);send(chat,'⌛ 종료 요청이 만료되었습니다. 경기를 계속 진행할 수 있습니다.');return;}
+    if(answer==='no'){
+      run("UPDATE match_stop_requests SET state='rejected',updated=? WHERE code=?",Date.now(),code);
+      send(chat,'❌ '+name(user)+' 님이 종료 요청을 거절했습니다.\n경기는 그대로 진행됩니다.');
+      return;
+    }
+    run("UPDATE match_stop_requests SET state='accepted',updated=? WHERE code=?",Date.now(),code);
+    scheduleStop(r,'mutual');
+  }
+  function scheduleStop(r,source){
+    const now=Date.now(),room=r.room_code?roomService.getByCode(r.room_code):null;
+    run("UPDATE match_requests SET status='cancelled',updated=? WHERE code=? AND status IN ('room_ready','playing','finished')",now,r.code);
+    if(r.match_id)run("UPDATE matches SET state='cancelled',turn=NULL WHERE id=? AND state IN ('active','waiting','requested')",r.match_id);
+    run("INSERT INTO match_continue_votes(code,deadline,close_after,state,updated) VALUES(?,?,?,'closing',?) ON CONFLICT(code) DO UPDATE SET close_after=excluded.close_after,state='closing',updated=excluded.updated,last_error=NULL",r.code,now,now+12000,now);
+    const who=source==='admin'?'관리자 강제 종료': '양측 합의 종료';
+    if(room?.chat)send(room.chat,'🛑 '+who+'\n\n매치 '+r.code+'의 진행이 중단되었습니다.\n약 12초 후 전용 그룹이 종료됩니다.\n완료된 이전 경기 기록은 보존됩니다.');
+    else{send(r.owner,'매치 '+r.code+'가 종료되었습니다.');if(r.guest)send(r.guest,'매치 '+r.code+'가 종료되었습니다.');}
+  }
+  function forceCloseForAdmin(code){
+    const r=get(code);if(!r)return false;
+    const room=r.room_code?roomService.getByCode(r.room_code):null;
+    if(room?.status==='closed'||votesFor(code)?.state==='closed')return false;
+    if(!room?.chat){return cancelForAdmin(code);}
+    if(votesFor(code)?.state==='closing')return true;
+    scheduleStop(r,'admin');return true;
+  }
   function onCallback(user,chat,p){if(p[0]!=='mf')return false;const op=p[1],code=p[2],r=code?get(code):null;
     if(op==='home'){sendMain(user);return true;}if(op==='help'){tutorial(user);return true;}if(op==='begin'){begin(user);return true;}if(op==='input_cancel'){run('DELETE FROM match_inputs WHERE user_id=?',user);sendMain(user);return true;}
     if(op==='lobby'){lobby(user);return true;}if(op==='mine'){mine(user);return true;}if(op==='public'){createPublic(user);return true;}
@@ -80,6 +123,8 @@ export function createMatchFlow(db, send, roomService, games, modes, rounds, opt
     if(op==='reject'&&r.status==='pending'&&((r.source==='public'&&r.owner===user)||(r.source==='direct'&&r.guest===user))){if(r.guest)send(r.guest,'❌ 매치 신청이 거절되었습니다: '+code);if(r.source==='public'){run("UPDATE match_requests SET status='public',guest=NULL,updated=? WHERE code=?",Date.now(),code);send(r.owner,'다른 회원의 신청을 계속 받을 수 있도록 대기 상태로 돌아갔습니다.',[[btn('🏛 대기실','mf:lobby')]]);}else{run("UPDATE match_requests SET status='cancelled',updated=? WHERE code=?",Date.now(),code);send(r.owner,'상대방이 대전 신청을 거절했습니다: '+code);}return true;}
     if(op==='withdraw'&&r.source==='public'&&r.status==='pending'&&r.guest===user){run("UPDATE match_requests SET status='public',guest=NULL,updated=? WHERE code=? AND guest=?",Date.now(),code,user);send(user,'참가 신청을 철회했습니다.');send(r.owner,'참가자가 신청을 철회했습니다. '+code+' 대기는 계속됩니다.');return true;}
     if(op==='cancel'&&r.owner===user&&['selecting','public','pending'].includes(r.status)){run("UPDATE match_requests SET status='cancelled',updated=? WHERE code=?",Date.now(),code);if(r.guest)send(r.guest,'대전 신청이 취소되었습니다: '+code);send(user,'취소되었습니다.');return true;}
+    if(op==='stop'){requestStop(user,chat,code);return true;}
+    if(op==='stopanswer'&&['yes','no'].includes(p[3])){approveStop(user,chat,code,p[3]);return true;}
     if(op==='again'&&['yes','no'].includes(p[3])){voteContinue(user,chat,code,p[3]);return true;}
     if(op==='notice'){notice(user,code,chat);return true;}if(op==='ready'){ready(user,code,chat);return true;}
     send(user,'이미 처리된 요청이거나 권한이 없습니다.');return true;
@@ -87,6 +132,7 @@ export function createMatchFlow(db, send, roomService, games, modes, rounds, opt
   function expireOne(r){const changed=run("UPDATE match_requests SET status='expired',updated=? WHERE code=? AND status IN ('selecting','public','pending')",Date.now(),r.code);if(!changed.changes)return;send(r.owner,'⌛ 매치 '+r.code+' 신청 시간이 만료됐습니다.');if(r.guest)send(r.guest,'⌛ 매치 '+r.code+' 신청 시간이 만료됐습니다.');}
   function tick(){const jobs=all("SELECT * FROM match_requests WHERE status IN ('selecting','public','pending') AND expires<? LIMIT 25",Date.now());for(const r of jobs)expireOne(r);
     const pending=all("SELECT * FROM match_requests WHERE status='room_pending' LIMIT 20");for(const r of pending){const room=roomService.getByCode(r.room_code||('R-'+r.code));if(room?.status==='ready'&&room.link&&room.link_guest)groupReady(r.code,{chat:room.chat,linkOwner:room.link,linkGuest:room.link_guest,code:room.code});else if(room?.status==='failed')groupFailed(r.code);}
+    for(const row of all("SELECT * FROM match_stop_requests WHERE state='pending' AND expires<? LIMIT 20",Date.now())){run("UPDATE match_stop_requests SET state='expired',updated=? WHERE code=? AND state='pending'",Date.now(),row.code);const room=get(row.code)?.room_code?roomService.getByCode(get(row.code).room_code):null;if(room?.chat)send(room.chat,'⌛ 중도 종료 요청이 만료됐습니다. 경기는 계속 진행됩니다.');}
     for(const row of all("SELECT * FROM match_continue_votes WHERE state='voting' AND deadline<? LIMIT 20",Date.now())){const r=get(row.code);if(r)closeDecision(r,'timeout');}
     for(const row of all("SELECT code FROM match_continue_votes WHERE state='closing' AND close_after<=? LIMIT 10",Date.now()))void processClose(row.code);
   }
@@ -136,7 +182,8 @@ export function createMatchFlow(db, send, roomService, games, modes, rounds, opt
     try{
       const r=get(code),v=votesFor(code);
       if(!r||!v||v.state!=='closing')return;
-      await roomService.close(r.room_code);
+      const closed=await roomService.close(r.room_code);
+      if(!closed)throw Error('ROOM_NOT_CLOSED');
       run("UPDATE match_continue_votes SET state='closed',updated=?,last_error=NULL WHERE code=?",Date.now(),code);
       send(r.owner,'✅ '+code+' 대전방이 종료되었습니다. 다시 대전하려면 봇에서 새로운 매치를 개설하세요.');
       if(r.guest)send(r.guest,'✅ '+code+' 대전방이 종료되었습니다.');
@@ -147,5 +194,5 @@ export function createMatchFlow(db, send, roomService, games, modes, rounds, opt
   }
 
   function cancelForAdmin(code){const r=get(code);if(!r||['finished','cancelled','expired'].includes(r.status))return false;run("UPDATE match_requests SET status='cancelled',updated=? WHERE code=?",Date.now(),code);if(r.match_id)run("UPDATE matches SET state='cancelled' WHERE id=? AND state!='finished'",r.match_id);send(r.owner,'운영자에 의해 대전이 중단됐습니다: '+code);if(r.guest)send(r.guest,'운영자에 의해 대전이 중단됐습니다: '+code);return true;}
-  return {sendMain,tutorial,begin,lobby,mine,onText,onCallback,tick,finished,cancelForAdmin,get,config,votesFor,processClose};
+  return {sendMain,tutorial,begin,lobby,mine,onText,onCallback,tick,finished,cancelForAdmin,forceCloseForAdmin,get,config,votesFor,stopFor,processClose};
 }
