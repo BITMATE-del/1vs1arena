@@ -17,7 +17,8 @@ const fakeRoom={
   reopen:code=>{const r=rooms.get(code);if(r)r.status='ready';},
   close:async code=>{const r=rooms.get(code);if(r)r.status='closed';return true;}
 };
-const flow=createMatchFlow(db,send,fakeRoom,{'🎲':['다이스',6],'🎯':['다트',6]},{wins:'선승제',round:'매판 승패'},[1,3,5],{gameEnabled:()=>true});
+const matchStarts=[];
+const flow=createMatchFlow(db,send,fakeRoom,{'🎲':['다이스',6],'🎯':['다트',6]},{wins:'선승제',round:'매판 승패'},[1,3,5],{gameEnabled:()=>true,onMatchStart:id=>matchStarts.push(id)});
 const get=()=>db.prepare("SELECT * FROM match_requests ORDER BY rowid DESC LIMIT 1").get();
 function act(user,chat,parts){assert.equal(flow.onCallback(user,chat,parts),true);}
 flow.begin(1001);
@@ -45,9 +46,8 @@ act(1002,-10012001200,['mf','ready',row.code]);
 assert.equal(get().status,'playing');
 const progress=messages.slice(statusStart);
 assert.equal(progress.filter(m=>m.user===1001||m.user===1002).length,0,'no duplicated private progress notifications');
-assert(progress.some(m=>m.user===-10012001200&&m.message.includes('양측 준비 완료')),'group receives match start notice');
-const startPrompt=progress.find(m=>m.user===-10012001200&&m.message.includes('양측 준비 완료'));
-assert(startPrompt.keyboard?.flat().some(b=>b.callback_data?.startsWith('dice:')),'group match start includes immediate one-tap dice action');
+assert.equal(matchStarts.length,1,'board update queued at match start');
+assert.equal(progress.filter(m=>m.message.includes('양측 준비 완료')).length,0,'no redundant match start prompts');
 const match=db.prepare('SELECT * FROM matches WHERE id=?').get(get().match_id);
 assert.equal(match.state,'active');assert.equal(match.game,'🎯');assert.equal(match.turn,1001);
 db.prepare("UPDATE matches SET state='finished' WHERE id=?").run(get().match_id);
@@ -60,6 +60,7 @@ act(1001,-10012001200,['mf','again',row.code,'yes']);assert.equal(flow.votesFor(
 act(1002,-10012001200,['mf','again',row.code,'yes']);assert.equal(get().status,'playing');
 const rematch=db.prepare('SELECT * FROM matches WHERE id=?').get(get().match_id);
 assert.notEqual(rematch.id,match.id,'rematch is a separate historic match');
+assert.deepEqual(matchStarts,[match.id,rematch.id],'single board refresh for each match start');
 assert.equal(rematch.state,'active');assert.equal(rematch.a,0);assert.equal(rematch.b,0);assert.equal(rooms.get(rcode).status,'ready');
 flow.finished(-10012001200);assert.equal(get().status,'finished');
 act(1001,-10012001200,['mf','again',row.code,'no']);assert.equal(flow.votesFor(row.code).state,'voting');
