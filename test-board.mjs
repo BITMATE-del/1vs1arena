@@ -36,4 +36,8 @@ db.prepare("UPDATE matches SET state='finished',a=9,b=11,turn=NULL").run();
 await board.sync({chat_id:-100123,match_id:10},tg);
 assert(sent.at(-1).payload.text.includes('승리: @challenger_two'));
 assert.equal(sent.at(-1).payload.reply_markup.inline_keyboard.length,0);
+db.prepare("UPDATE matches SET state='cancelled' WHERE id=10").run();
+await board.sync({chat_id:-100123,match_id:10},tg);
+assert(sent.at(-1).payload.text.includes('경기 중도 종료'),'stopped match shows terminated status');
+assert.equal(sent.at(-1).payload.reply_markup.inline_keyboard.length,0,'stopped match has no action controls');
 console.log('GLORY ARENA pinned match board tests PASS',sent.length,'Telegram calls');
