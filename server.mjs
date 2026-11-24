@@ -1,5 +1,6 @@
 import http from 'node:http';
 import { createHash, timingSafeEqual } from 'node:crypto';
+import { createTelegramAuth } from './telegram-auth.mjs';
 import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
@@ -118,6 +119,7 @@ async function drain(){if(busy||!webhookReady)return;busy=true;try{for(;;){const
 function validSecret(req){const a=Buffer.from(String(req.headers['x-telegram-bot-api-secret-token']||''));const b=Buffer.from(secret);return a.length===b.length&&timingSafeEqual(a,b);}
 
 const adminPassword=process.env.ADMIN_PASSWORD||'';
+const telegramAuth=createTelegramAuth(db,secret,adminPassword);
 const adminAttempts=new Map();
 const adminGlobalAttempts={count:0,until:0};
 const escapeHtml=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -142,6 +144,19 @@ let raw='';for await(const chunk of req){raw+=chunk.toString();if(raw.length>120
 const q=new URLSearchParams(raw),provided=q.get('csrf')||'';
 if(!/^[a-f0-9]{64}$/.test(provided)||!timingSafeEqual(Buffer.from(provided),Buffer.from(csrf))){res.writeHead(403).end();return true;}
 const act=q.get('action'),id=Number(q.get('id')),value=q.get('value')||'';let changed=false;
+if(['tg_send','tg_code','tg_password','tg_session','tg_verify','tg_logout','tg_cancel'].includes(act)){
+let result='ok';try{
+if(act==='tg_send')await telegramAuth.start((q.get('phone')||'').trim());
+if(act==='tg_code')await telegramAuth.code((q.get('code')||'').trim());
+if(act==='tg_password')await telegramAuth.password(q.get('password')||'');
+if(act==='tg_session')await telegramAuth.registerSession((q.get('session')||'').trim());
+if(act==='tg_verify')await telegramAuth.verify();
+if(act==='tg_logout')await telegramAuth.disconnect();
+if(act==='tg_cancel')await telegramAuth.cancel();
+run('INSERT INTO admin_audit(at,action,target) VALUES(?,?,?)',Date.now(),act,'telegram_account');
+}catch(e){result=telegramAuth.error(e);}
+res.writeHead(303,{location:'/admin?tab=telegram&result='+encodeURIComponent(result)}).end();return true;
+}
 db.exec('BEGIN IMMEDIATE');try{
 if(['block','unblock','note'].includes(act)&&Number.isSafeInteger(id)&&one('SELECT id FROM arena_users WHERE id=?',id)){
 if(act==='note')run('UPDATE arena_users SET note=? WHERE id=?',value.slice(0,500),id);
@@ -185,10 +200,21 @@ if(tab==='records'){const rows=all("SELECT * FROM rolls WHERE CAST(match AS TEXT
 content='<section><h2>텔레그램 원본 판정</h2><p>수신한 공식 이모지 결과와 메시지 번호를 조회합니다. 수정 및 삭제 기능은 제공하지 않습니다.</p>'+finder()+table(['경기','그룹','메시지 ID','라운드','참가자','공식 값'],rows.map(r=>tr([r.match,r.chat,r.message,r.round,r.player,r.value])))+paging()+'</section>';}
 if(tab==='games'){content='<section><h2>신규 매치 접수</h2><p>기존 경기를 유지하면서 신규 경기 개설을 제어합니다.</p>'+form('matches_enabled','',valueField(setting('matches_enabled','1')==='1'?'0':'1'),setting('matches_enabled','1')==='1'?'신규 접수 중단':'신규 접수 허용')+'</section><section><h2>게임별 설정</h2>'+table(['게임','공식 값 범위','신규 개설','관리'],Object.entries(games).map(([g,v])=>tr([g+' '+v[0],'1~'+v[1],gameEnabled(g)?'사용':'중단'],'<td>'+form('game',g,valueField(gameEnabled(g)?'0':'1'),gameEnabled(g)?'비활성화':'활성화')+'</td>')))+'<p>무료 대전만 지원합니다. 슬롯은 원시 값 비교이며 조합 판정은 미구현입니다.</p></section>';}
 if(tab==='bot'){content='<section><h2>연결 정보</h2><p>공식 봇: @'+esc(username)+'<br>웹훅: '+(webhookReady?'정상':'미연결')+'<br>API ID / HASH: '+(process.env.TELEGRAM_API_ID&&process.env.TELEGRAM_API_HASH?'등록 완료':'미등록')+'<br>시작 이미지: '+(process.env.WELCOME_PHOTO_FILE_ID?'등록 완료':'확인 필요')+'<br>마지막 오류: '+esc(lastError||'없음')+'</p><p>계정 로그인 및 자동 그룹 생성은 미연동입니다. 비밀값은 표시하지 않습니다.</p></section><section><h2>시작 화면 문구</h2>'+form('welcome_caption','', '<textarea name="value" maxlength="900" rows="7" required>'+esc(setting('welcome_caption','⚜️ GLORY ARENA\n승부의 끝, 영광의 시작.\n\n당신의 다음 승부를 시작하세요.\n매치를 개설하거나 대기실에서 상대를 만나보세요.\n\n1vs1 무료 대전 · 텔레그램 공식 게임'))+'</textarea>','문구 저장')+'</section>';}
+
 if(tab==='telegram'){
-const configured=Boolean(process.env.TELEGRAM_API_ID&&process.env.TELEGRAM_API_HASH);
-const sessionConfigured=Boolean(process.env.TELEGRAM_SESSION);
-content='<section><h2>그룹 생성 전용 계정</h2><p>GLORY ARENA 공식 봇과 별도로 운영자가 소유한 텔레그램 사용자 계정을 연결하는 영역입니다.</p>'+table(['항목','상태'],[tr(['API ID',process.env.TELEGRAM_API_ID?'등록 완료':'미등록']),tr(['API HASH',process.env.TELEGRAM_API_HASH?'등록 완료':'미등록']),tr(['사용자 세션',sessionConfigured?'환경변수 등록 · 인증 미검증':'미등록']),tr(['계정 인증','미연동']),tr(['자동 그룹 생성','미연동'])])+'</section><section><h2>계정 연결 안내</h2><p>'+(configured?'API 정보는 이미 등록되어 있습니다.':'먼저 Railway에서 API ID 및 API HASH를 설정하세요.')+'</p><p>계정 인증은 운영자 소유 기기에서 공식 텔레그램 인증 절차를 거쳐야 합니다. 인증번호와 2단계 비밀번호를 이 웹페이지 또는 채팅에 입력하지 마세요. 현재 사용자 계정 연결 모듈은 설치되지 않았습니다.</p><a href="https://my.telegram.org/apps" rel="noopener noreferrer">텔레그램 API 관리</a></section><section><h2>그룹 생성 운영 상태</h2><p>자동 그룹 생성 기능은 비활성화되어 있습니다. 연결이 검증되기 전에는 실제 그룹 생성 요청을 실행하지 않습니다.</p><a class="btn" href="/admin?tab=rooms">기존 방 관리</a></section>';
+const a=telegramAuth.info();
+const msg={ok:'요청이 처리되었습니다.',PHONE_INVALID:'전화번호를 +821012345678 형식으로 입력하세요.',PHONE_NUMBER_INVALID:'텔레그램에 등록된 번호를 확인하세요.',PHONE_CODE_INVALID:'인증번호가 올바르지 않습니다.',PHONE_CODE_EXPIRED:'인증번호가 만료되었습니다. 다시 발송하세요.',PASSWORD_HASH_INVALID:'2단계 비밀번호가 올바르지 않습니다.',LOGIN_EXPIRED:'인증 시간이 만료되었습니다. 처음부터 다시 진행하세요.',FLOOD_WAIT:'텔레그램 요청 제한입니다. 일정 시간 이후 다시 시도하세요.',TELEGRAM_ERROR:'텔레그램 연결 오류입니다. API 정보와 연결 상태를 확인하세요.',UNAUTHORIZED:'유효하지 않은 세션입니다.',SESSION_INVALID:'세션 형식이 올바르지 않습니다.',USER_REQUIRED:'봇이 아닌 사용자 계정만 등록할 수 있습니다.',API_MISSING:'API ID와 HASH를 먼저 설정하세요.',NOT_CONNECTED:'연결된 계정이 없습니다.',TOO_MANY_ATTEMPTS:'인증 시도 횟수를 초과했습니다.',PASSWORD_INVALID:'비밀번호가 올바르지 않습니다.',CODE_INVALID:'인증번호 형식이 올바르지 않습니다.'};
+const notices=url.searchParams.get('result');const notice=notices?'<section><p>'+esc(msg[notices]||'요청 결과를 확인하세요.')+'</p></section>':'';
+const field=(name,label,type='text',placeholder='')=>'<label>'+label+'<input name="'+name+'" type="'+type+'" placeholder="'+esc(placeholder)+'" required autocomplete="off"></label>';
+const sendForm=(name,fields,label)=>form(name,'',fields,label);
+const state=a.connected?'<p><b>연결된 계정</b> · '+esc(a.name||'-')+' '+(a.username?'@'+esc(a.username):'')+' · ID '+esc(a.id)+'</p>':'<p>현재 연결된 사용자 계정이 없습니다.</p>';
+content=notice+'<section><h2>그룹 생성 전용 계정</h2>'+state+table(['항목','상태'],[tr(['API ID',a.configured?'등록 완료':'확인 필요']),tr(['사용자 세션',a.connected?'암호화 저장 완료':'미등록']),tr(['인증 진행',a.stage==='code'?'인증번호 입력 대기':a.stage==='password'?'2단계 비밀번호 입력 대기':'대기')])+(a.connected?sendForm('tg_verify','','연결 확인')+sendForm('tg_logout','','연결 해제'):'')+'</section>';
+if(!a.connected)content+='<section><h2>전화번호로 로그인</h2><p>본인이 소유한 텔레그램 계정으로만 로그인하세요. 수신된 인증번호와 2단계 비밀번호는 서버에 저장되지 않습니다.</p>'+
+(a.stage==='code'?sendForm('tg_code',field('code','텔레그램 인증번호','text','12345'),'인증 완료'):
+a.stage==='password'?sendForm('tg_password',field('password','2단계 비밀번호','password'),'계정 연결'):
+sendForm('tg_send',field('phone','국가번호 포함 전화번호','tel','+821012345678'),'인증번호 받기'))+
+(a.stage?sendForm('tg_cancel','','인증 취소'):'')+'</section><section><h2>기존 세션 등록</h2><p>운영자 본인이 생성한 GramJS StringSession만 등록하세요. 등록되면 암호화하여 서버 DB에 저장합니다.</p>'+sendForm('tg_session','<label>StringSession<textarea name="session" maxlength="20000" rows="3" required autocomplete="off" placeholder="1..."></textarea></label>','세션 연결')+'</section>';
+content+='<section><h2>대전방 생성 상태</h2><p>계정 연결 기능과 그룹 자동 생성 기능은 별도입니다. 자동 그룹 생성 엔진은 아직 연결되지 않았습니다.</p></section>';
 }
 if(tab==='audit'){const rows=all('SELECT * FROM admin_audit ORDER BY id DESC LIMIT 50 OFFSET ?',offset);const names={block:'회원 제한',unblock:'회원 제한 해제',note:'회원 메모',room_enable:'방 활성화',room_disable:'방 중단',cancel:'대기 경기 취소',game:'게임 설정',matches_enabled:'신규 매치 설정',welcome_caption:'시작 문구 수정'};content='<section><h2>관리자 변경 기록</h2>'+table(['시간','작업','대상'],rows.map(r=>tr([date(r.at),names[r.action]||r.action,r.target])))+paging()+'</section>';}
 const nav=Object.entries(sections).map(([k,v])=>'<a class="'+(k===tab?'selected':'')+'" href="/admin?tab='+k+'">'+v+'</a>').join('');
