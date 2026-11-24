@@ -36,18 +36,20 @@ export function createMatchBoard(db, enqueue) {
     text+='\n';
     if(active){
       text+='🔴 현재 차례: '+label+'\n';
-      text+='👉 '+label+' 님만 아래 버튼을 눌러주세요.\n';
+      text+='👉 '+label+' 님이 채팅 입력창에서 '+m.game+' 공식 게임을 직접 보내주세요.\n';
       text+='📍 진행 라운드 '+m.round+' / '+m.rounds;
     }else if(m.state==='finished'){
       text+='🏆 경기 종료\n';
       text+=m.a===m.b?'🤝 무승부':'🥇 승리: '+(m.a>m.b?a:b);
       text+='\n추가 경기 여부를 아래 안내에서 선택하세요.';
     }else{text+='경기 상태: '+m.state;}
-    const button=active?[[{text:m.game+' '+label.slice(0,22)+' 굴리기',callback_data:'dice:'+m.id}]]:undefined;
-    return {text,reply_markup:button?{inline_keyboard:button}:{inline_keyboard:[]}};
+    return {text,reply_markup:{inline_keyboard:[]}};
   }
   function queue(chat){const m=one("SELECT * FROM matches WHERE chat=? AND state IN ('active','finished') ORDER BY id DESC LIMIT 1",chat);if(m)enqueue('arenaBoardSync',{chat_id:chat,match_id:m.id});}
   function queueMatch(id){const m=one('SELECT chat FROM matches WHERE id=?',id);if(m)enqueue('arenaBoardSync',{chat_id:m.chat,match_id:id});}
+  async function sendUserKeyboard(chat,m,tg){
+    await tg('sendMessage',{chat_id:chat,text:'🎮 '+player(m.turn)+' 님 차례입니다.\\n아래 '+m.game+' 버튼은 회원 본인 계정에서 전송됩니다.\\n공식 애니메이션 결과만 점수로 인정하며, 일반 텍스트 이모지는 점수로 처리되지 않습니다.',reply_markup:{keyboard:[[{text:m.game}]],resize_keyboard:true,is_persistent:true,one_time_keyboard:false}});
+  }
   async function sync(payload,tg){
     const chat=payload.chat_id;
     // Match ID is an explicit version; stale queued boards cannot override a rematch.
@@ -58,6 +60,7 @@ export function createMatchBoard(db, enqueue) {
     if(board?.message){
       try{
         await tg('editMessageText',{chat_id:chat,message_id:board.message,text:view.text,reply_markup:view.reply_markup});
+        if(board.match!==latest.id&&latest.state==='active')await sendUserKeyboard(chat,latest,tg);
         run('UPDATE match_boards SET match=?,updated=? WHERE chat=?',latest.id,Date.now(),chat);
         return;
       }catch(e){
@@ -70,6 +73,7 @@ export function createMatchBoard(db, enqueue) {
     if(!result?.message_id)throw Error('BOARD_MESSAGE_MISSING');
     run('INSERT INTO match_boards(chat,match,message,updated) VALUES(?,?,?,?) ON CONFLICT(chat) DO UPDATE SET match=excluded.match,message=excluded.message,updated=excluded.updated',chat,latest.id,result.message_id,Date.now());
     try{await tg('pinChatMessage',{chat_id:chat,message_id:result.message_id,disable_notification:true});}catch(e){console.warn('Match board pin unavailable',{code:e?.code||'network'});}
+    if(latest.state==='active')await sendUserKeyboard(chat,latest,tg);
   }
   return {queue,queueMatch,render,sync,player};
 }
