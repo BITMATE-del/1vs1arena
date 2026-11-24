@@ -74,6 +74,27 @@ export function createRoomService(db,telegramAuth,botUsername,send){
     }finally{callbacks.delete(job.code);busy=false;}
   }
   function finish(code){run("UPDATE generated_rooms SET status='finished' WHERE code=? AND status='ready'",code);}
+  function reopen(code){run("UPDATE generated_rooms SET status='ready' WHERE code=? AND status='finished'",code);}
+  async function close(code){
+    const room=getByCode(code);
+    if(!room||!room.chat||!['finished','ready','closing','close_failed'].includes(room.status))return false;
+    if(room.status==='closed')return true;
+    if(!connected())throw Error('ACCOUNT_NOT_CONNECTED');
+    run("UPDATE generated_rooms SET status='closing' WHERE code=?",code);
+    try{
+      await telegramAuth.withClient(async client=>{
+        const peer=await client.getInputEntity(room.chat);
+        await client.invoke(new Api.channels.DeleteChannel({channel:peer}));
+      });
+      run("UPDATE generated_rooms SET status='closed',link=NULL,link_guest=NULL,error=NULL WHERE code=?",code);
+      return true;
+    }catch(e){
+      const reason=String(e?.errorMessage||e?.message||'UNKNOWN').replace(/\\+?\\d{8,}/g,'[redacted]').slice(0,90);
+      run("UPDATE generated_rooms SET status='close_failed',error=? WHERE code=?",reason,code);
+      console.warn('Generated match group close failed',{code,reason});
+      throw e;
+    }
+  }
   // Never silently retry group creation after restart: a failed/partial operation
   // could otherwise create multiple groups for one match.
   function recover(){
@@ -81,5 +102,5 @@ export function createRoomService(db,telegramAuth,botUsername,send){
     for(const r of stale){run("UPDATE generated_rooms SET status='failed',error='INTERRUPTED' WHERE code=?",r.code);try{callbacks.get(r.code)?.onFailed?.(r.request_code);}catch{}}
   }
   function isGeneratedChat(chat){return !!one('SELECT 1 FROM generated_rooms WHERE chat=?',chat);}
-  return {request,requestPair,work,getByCode,connected,finish,recover,isGeneratedChat};
+  return {request,requestPair,work,getByCode,connected,finish,reopen,close,recover,isGeneratedChat};
 }
