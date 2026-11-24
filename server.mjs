@@ -142,7 +142,7 @@ const adminPassword=process.env.ADMIN_PASSWORD||'';
 const telegramAuth=createTelegramAuth(db,secret,adminPassword);
 const roomService=createRoomService(db,telegramAuth,username,send);
 const matchBoard=createMatchBoard(db,enqueue);
-const matchFlow=createMatchFlow(db,send,roomService,games,modes,rounds,{gameEnabled,onMatchStart:id=>matchBoard.queueMatch(id)});
+const matchFlow=createMatchFlow(db,send,roomService,games,modes,rounds,{gameEnabled,onMatchStart:id=>matchBoard.queueMatch(id),onMatchStopped:id=>matchBoard.queueMatch(id)});
 const adminAttempts=new Map();
 const adminGlobalAttempts={count:0,until:0};
 const escapeHtml=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
