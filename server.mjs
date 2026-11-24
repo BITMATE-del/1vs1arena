@@ -32,7 +32,7 @@ const welcomeSetupHash='f27a916bb327294d267c9cf51a30a058c19be78304a25309a0ae278c
 function menu(chat){
 const photo=process.env.WELCOME_PHOTO_FILE_ID||one("SELECT value FROM welcome_settings WHERE key='photo'")?.value;
 const buttons=[[button('⚔ 매치 개설','choose'),button('🏛 대기실 입장','lobby')],[button('📊 내 전적','stats'),button('📖 이용 안내','guide')]];
-const caption='승부의 끝, 영광의 시작.\n실시간 1vs1 무료 대전';
+const caption='⚜️ GLORY ARENA\n━━━━━━━━━━━━━━\n승부의 끝, 영광의 시작.\n\n당신의 다음 승부를 시작하세요.\n매치를 개설하거나 대기실에서 상대를 만나보세요.\n\n1vs1 무료 대전 · 텔레그램 공식 게임';
 if(!one("SELECT value FROM welcome_settings WHERE key=?", 'keyboard:'+chat)){
 enqueue('sendMessage',{chat_id:chat,text:'GLORY ARENA',reply_markup:{remove_keyboard:true}});
 run('INSERT OR IGNORE INTO welcome_settings(key,value) VALUES(?,?)','keyboard:'+chat,'1');
