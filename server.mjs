@@ -5,6 +5,7 @@ import { createRoomService } from './rooms.mjs';
 import { createMatchFlow } from './match-flow.mjs';
 import { createMatchBoard } from './match-board.mjs';
 import { gameEmoji, validDiceMessage, gameInstructions } from './game-emojis.mjs';
+import { createSpecialDiceEngine, isSpecialMode, SPECIAL_MODES } from './special-rules.mjs';
 import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
@@ -24,12 +25,13 @@ db.exec("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000");
 db.exec('CREATE TABLE IF NOT EXISTS matches(id INTEGER PRIMARY KEY, chat INTEGER NOT NULL, owner INTEGER NOT NULL, guest INTEGER, game TEXT NOT NULL, mode TEXT NOT NULL, rounds INTEGER NOT NULL, state TEXT NOT NULL DEFAULT "waiting", turn INTEGER, round INTEGER NOT NULL DEFAULT 1, a INTEGER NOT NULL DEFAULT 0, b INTEGER NOT NULL DEFAULT 0)'.replace('DEFAULT "waiting"', "DEFAULT 'waiting'"));
 db.exec('CREATE TABLE IF NOT EXISTS rolls(chat INTEGER, message INTEGER, match INTEGER, round INTEGER, player INTEGER, value INTEGER, PRIMARY KEY(chat,message), UNIQUE(match,round,player)); CREATE TABLE IF NOT EXISTS updates(id INTEGER PRIMARY KEY); CREATE TABLE IF NOT EXISTS outbox(id INTEGER PRIMARY KEY, method TEXT NOT NULL, payload TEXT NOT NULL)');
 const games={'🎲':['다이스',6],'🏀':['농구',5],'⚽':['축구',5],'🎯':['다트',6],'🎳':['볼링',6],'🎰':['슬롯',64]};
-const modes={wins:'선승제',total:'점수 합산',round:'매판 승패'};
+const modes={wins:'선승제',total:'점수 합산',round:'매판 승패',...SPECIAL_MODES};
 const rounds=[1,3,5,7,9];
 const one=(sql,...args)=>db.prepare(sql).get(...args);
 const all=(sql,...args)=>db.prepare(sql).all(...args);
 const run=(sql,...args)=>db.prepare(sql).run(...args);
 const button=(text,callback_data)=>({text,callback_data});
+const specialDice=createSpecialDiceEngine(db);
 
 db.exec("CREATE TABLE IF NOT EXISTS arena_users(id INTEGER PRIMARY KEY, name TEXT NOT NULL, username TEXT NOT NULL DEFAULT '', first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL, blocked INTEGER NOT NULL DEFAULT 0, note TEXT NOT NULL DEFAULT ''); CREATE TABLE IF NOT EXISTS arena_rooms(id INTEGER PRIMARY KEY, title TEXT NOT NULL, last_seen INTEGER NOT NULL, enabled INTEGER NOT NULL DEFAULT 1); CREATE TABLE IF NOT EXISTS admin_audit(id INTEGER PRIMARY KEY, at INTEGER NOT NULL, action TEXT NOT NULL, target TEXT NOT NULL); CREATE TABLE IF NOT EXISTS arena_settings(key TEXT PRIMARY KEY,value TEXT NOT NULL)");
 function setting(k,fallback=''){return one('SELECT value FROM arena_settings WHERE key=?',k)?.value??fallback;}
@@ -91,7 +93,13 @@ if(!g||!validDiceMessage(dice,g)||one('SELECT 1 FROM rolls WHERE chat=? AND mess
 const row=one("SELECT * FROM matches WHERE chat=? AND state='active' AND turn=?",cid,user);
 if(!row)return;
 if(!validDiceMessage(dice,row.game)){send(cid,'⚠️ 현재 경기는 '+row.game+' '+(games[row.game]?.[0]||'공식 게임')+'입니다.\n다른 종목 결과는 점수로 기록되지 않습니다.\n\n'+gameInstructions(row.game));return;}
-const id=row.id,r=row.round;run('INSERT INTO rolls VALUES(?,?,?,?,?,?)',cid,message_id,id,r,user,v);
+const id=row.id,r=row.round;
+if(isSpecialMode(row.mode)){
+  const result=specialDice.accept(row,{chat:cid,user,value:v,message:message_id});
+  if(result.accepted){matchBoard.queueMatch(id);if(result.done)matchFlow.finished(cid);}
+  return;
+}
+run('INSERT INTO rolls VALUES(?,?,?,?,?,?)',cid,message_id,id,r,user,v);
 if(user===row.owner){run('UPDATE matches SET turn=guest WHERE id=?',id);matchBoard.queueMatch(id);return;}
 const av=one('SELECT value FROM rolls WHERE match=? AND round=? AND player=?',id,r,row.owner).value;
 let a=row.a,b=row.b;if(row.mode==='total'){a+=av;b+=v;}else{a+=Number(av>v);b+=Number(v>av);}
@@ -109,9 +117,9 @@ if(p[0]==='guide'){guide(cid);return;}
 if(chat.type==='private'){if(p[0]==='choose'){matchFlow.begin(user);return;}if(p[0]==='lobby'){matchFlow.lobby(user);return;}groupLink(cid);return;}
 if(p[0]==='lobby'){lobby(cid);return;}
 if(p[0]==='choose'){choose(cid);return;}
-if(p[0]==='game'&&Object.hasOwn(games,p[1])){send(cid,'경기 방식 선택',Object.entries(modes).map(([k,t])=>[button(t,'mode:'+p[1]+':'+k)]));return;}
-if(p[0]==='mode'&&Object.hasOwn(games,p[1])&&Object.hasOwn(modes,p[2])){send(cid,'경기 횟수 선택',[rounds.map(n=>button(n+'판','new:'+p[1]+':'+p[2]+':'+n))]);return;}
-if(p[0]==='new'&&setting('matches_enabled','1')==='1'&&gameEnabled(p[1])&&Object.hasOwn(games,p[1])&&Object.hasOwn(modes,p[2])&&rounds.includes(Number(p[3]))){const id=Number(run('INSERT INTO matches(chat,owner,game,mode,rounds) VALUES(?,?,?,?,?)',cid,user,p[1],p[2],Number(p[3])).lastInsertRowid);send(cid,'#'+id+' 매치 개설 완료',[[button('매치 신청','join:'+id),button('취소','cancel:'+id)]]);return;}
+if(p[0]==='game'&&Object.hasOwn(games,p[1])){send(cid,'경기 방식 선택',Object.entries(modes).filter(([key])=>p[1]==='🎲'||!isSpecialMode(key)).map(([k,t])=>[button(t,'mode:'+p[1]+':'+k)]));return;}
+if(p[0]==='mode'&&Object.hasOwn(games,p[1])&&Object.hasOwn(modes,p[2])&&(!isSpecialMode(p[2])||p[1]==='🎲')){send(cid,'경기 횟수 선택',[rounds.map(n=>button(n+'판','new:'+p[1]+':'+p[2]+':'+n))]);return;}
+if(p[0]==='new'&&setting('matches_enabled','1')==='1'&&gameEnabled(p[1])&&Object.hasOwn(games,p[1])&&Object.hasOwn(modes,p[2])&&(!isSpecialMode(p[2])||p[1]==='🎲')&&rounds.includes(Number(p[3]))){const id=Number(run('INSERT INTO matches(chat,owner,game,mode,rounds) VALUES(?,?,?,?,?)',cid,user,p[1],p[2],Number(p[3])).lastInsertRowid);send(cid,'#'+id+' 매치 개설 완료',[[button('매치 신청','join:'+id),button('취소','cancel:'+id)]]);return;}
 if(['join','accept','reject','cancel'].includes(p[0])&&/^\d+$/.test(p[1]||'')){action(cid,user,Number(p[1]),p[0]);return;}return;}
 const m=u.message;if(!m?.from||!['private','group','supergroup'].includes(m.chat?.type))return;
 if(setWelcome(m))return;
