@@ -1,5 +1,5 @@
 import http from 'node:http';
-import { createHash, timingSafeEqual } from 'node:crypto';
+import { createHash, timingSafeEqual, randomBytes } from 'node:crypto';
 import { createTelegramAuth } from './telegram-auth.mjs';
 import { createRoomService } from './rooms.mjs';
 import { createMatchFlow } from './match-flow.mjs';
@@ -55,9 +55,10 @@ send(chat,'👤 지금은 '+current+' 님 차례입니다.\n\n'+gameInstructions
 function enqueue(method,payload){run('INSERT INTO outbox(method,payload) VALUES(?,?)',method,JSON.stringify(payload));}
 function send(chat,text,buttons){enqueue('sendMessage',{chat_id:chat,text,...(buttons?{reply_markup:{inline_keyboard:buttons}}:{})});}
 db.exec('CREATE TABLE IF NOT EXISTS welcome_settings(key TEXT PRIMARY KEY,value TEXT NOT NULL)');
+db.exec('CREATE TABLE IF NOT EXISTS welcome_banner_tokens(hash TEXT PRIMARY KEY,expires INTEGER NOT NULL)');
 const welcomeSetupHash='f27a916bb327294d267c9cf51a30a058c19be78304a25309a0ae278c63ab20f5';
 function menu(chat){
-const photo=process.env.WELCOME_PHOTO_FILE_ID||one("SELECT value FROM welcome_settings WHERE key='photo'")?.value;
+const photo=one("SELECT value FROM welcome_settings WHERE key='photo'")?.value||process.env.WELCOME_PHOTO_FILE_ID;
 const buttons=[[button('🎯 상대 지정 대결','mf:begin'),button('⏳ 매치 대기 등록','mf:public')],[button('🏛 공개 매치 대기실','mf:lobby'),button('🎮 내 경기','mf:mine')],[button('📊 내 전적','stats'),button('📖 이용 안내','mf:help')]];
 const caption=setting('welcome_caption','⚜️ GLORY ARENA\n━━━━━━━━━━━━━━\n승부의 끝, 영광의 시작.\n\n당신의 다음 승부를 시작하세요.\n매치를 개설하거나 대기실에서 상대를 만나보세요.\n\n1vs1 무료 대전 · 텔레그램 공식 게임');
 if(photo)enqueue('sendPhoto',{chat_id:chat,photo,caption,reply_markup:{inline_keyboard:buttons}});
@@ -70,14 +71,23 @@ send(chat,'내 전적\n\n총 경기 '+r.total+'회\n승리 '+r.wins+' · 패배 
 }
 function setWelcome(m){
 if(m.chat.type!=='private'||!Array.isArray(m.photo)||!m.photo.length||!m.caption?.startsWith('/banner '))return false;
-const supplied=createHash('sha256').update(m.caption.slice(8).trim()).digest('hex');
-if(!timingSafeEqual(Buffer.from(supplied),Buffer.from(welcomeSetupHash)))return false;
-if(process.env.WELCOME_PHOTO_FILE_ID||one("SELECT value FROM welcome_settings WHERE key='photo'")){send(m.chat.id,'시작 이미지가 이미 등록되어 있습니다.');return true;}
+const code=m.caption.slice('/banner '.length).trim();
+const hash=createHash('sha256').update(code).digest('hex');
+const entry=one('SELECT expires FROM welcome_banner_tokens WHERE hash=?',hash);
+if(!entry||entry.expires<Date.now()){send(m.chat.id,'시작 이미지 등록 코드가 만료되었거나 올바르지 않습니다. 관리자 화면에서 새 코드를 발급받으세요.');return true;}
 const photo=m.photo.at(-1).file_id;
 if(typeof photo!=='string'||photo.length<5)return false;
-run("INSERT INTO welcome_settings(key,value) VALUES('photo',?)",photo);
-console.log('Welcome photo registered; file_id='+photo);
-send(m.chat.id,'시작 이미지 등록 완료.');menu(m.chat.id);return true;
+db.exec('BEGIN IMMEDIATE');
+try{
+  const deleted=run('DELETE FROM welcome_banner_tokens WHERE hash=? AND expires>=?',hash,Date.now()).changes;
+  if(!deleted){db.exec('ROLLBACK');send(m.chat.id,'등록 코드가 이미 사용되었습니다.');return true;}
+  run('DELETE FROM welcome_banner_tokens');
+  run("INSERT INTO welcome_settings(key,value) VALUES('photo',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",photo);
+  db.exec('COMMIT');
+}catch(e){db.exec('ROLLBACK');throw e;}
+console.log('Welcome image replaced through one-time admin registration code');
+send(m.chat.id,'✅ 새 봇의 시작 이미지가 등록되었습니다.\n아래 /start를 눌러 시작 화면을 확인하세요.');
+menu(m.chat.id);return true;
 }
 function groupLink(chat){send(chat,'대전은 텔레그램 그룹에서 진행합니다.',[[{text:'그룹에 글로리 아레나 추가',url:'https://t.me/'+username+'?startgroup=true'}]]);}
 function choose(chat){if(setting('matches_enabled','1')!=='1'){send(chat,'현재 신규 매치 개설이 중단되어 있습니다.');return;}send(chat,'게임을 선택하세요.',Object.entries(games).filter(([g])=>gameEnabled(g)).map(([g,v])=>[button(g+' '+v[0],'game:'+g)]).concat([[button('메인 메뉴','menu')]]));}
@@ -183,6 +193,14 @@ let raw='';for await(const chunk of req){raw+=chunk.toString();if(raw.length>120
 const q=new URLSearchParams(raw),provided=q.get('csrf')||'';
 if(!/^[a-f0-9]{64}$/.test(provided)||!timingSafeEqual(Buffer.from(provided),Buffer.from(csrf))){res.writeHead(403).end();return true;}
 const act=q.get('action'),id=Number(q.get('id')),value=q.get('value')||'';let changed=false;
+if(act==='banner_generate'){
+const code=randomBytes(18).toString('base64url');
+const hash=createHash('sha256').update(code).digest('hex');
+run('DELETE FROM welcome_banner_tokens');
+run('INSERT INTO welcome_banner_tokens(hash,expires) VALUES(?,?)',hash,Date.now()+15*60000);
+const instruction='/banner '+code;
+adminPage(res,'<header><h1>GLORY ARENA 시작 이미지 등록</h1></header><section><h2>새 봇 시작 이미지 등록 코드</h2><p>15분 이내 1회 사용 가능. 본인의 텔레그램에서 @'+escapeHtml(username)+' 봇에게 사진을 보내고, 사진의 설명(캡션)에 아래 문구를 붙여넣으세요.</p><textarea readonly rows="3">'+escapeHtml(instruction)+'</textarea><p>이미지가 사진으로 전송되어야 합니다. 파일로 전송하면 인식하지 않습니다. 코드는 다른 사람에게 공유하지 마세요.</p><p>등록 후 새 봇에서 /start를 눌러 확인하세요.</p><a href="/admin?tab=bot">봇 설정으로 돌아가기</a></section>');return true;
+}
 if(act==='mr_cancel'&&/^GA-[A-F0-9]{8}$/.test(String(q.get('code')||''))){const done=matchFlow.cancelForAdmin(q.get('code'));res.writeHead(303,{location:'/admin?tab=requests&saved='+Number(done)}).end();void drain();return true;}
 if(act==='close_retry'&&/^GA-[A-F0-9]{8}$/.test(String(q.get('code')||''))){const code=q.get('code');const done=matchFlow.retryCloseForAdmin(code);if(done)run('INSERT INTO admin_audit(at,action,target) VALUES(?,?,?)',Date.now(),'close_retry',code);res.writeHead(303,{location:'/admin?tab=operations&saved='+Number(done)}).end();void drain();return true;}
 if(act==='mr_force'&&/^GA-[A-F0-9]{8}$/.test(String(q.get('code')||''))){const code=q.get('code');const done=matchFlow.forceCloseForAdmin(code);if(done)run('INSERT INTO admin_audit(at,action,target) VALUES(?,?,?)',Date.now(),'force_match_close',code);res.writeHead(303,{location:'/admin?tab=requests&saved='+Number(done)}).end();void drain();return true;}
@@ -246,7 +264,7 @@ content='<section><h2>경기 현황</h2><p>대기 및 신청 접수 경기만 �
 if(tab==='records'){const rows=all("SELECT * FROM rolls WHERE CAST(match AS TEXT) LIKE ? OR CAST(player AS TEXT) LIKE ? OR CAST(chat AS TEXT) LIKE ? ORDER BY rowid DESC LIMIT 50 OFFSET ?",like,like,like,offset);
 content='<section><h2>텔레그램 원본 판정</h2><p>수신한 공식 이모지 결과와 메시지 번호를 조회합니다. 수정 및 삭제 기능은 제공하지 않습니다.</p>'+finder()+table(['경기','그룹','메시지 ID','라운드','참가자','공식 값'],rows.map(r=>tr([r.match,r.chat,r.message,r.round,r.player,r.value])))+paging()+'</section>';}
 if(tab==='games'){content='<section><h2>신규 매치 접수</h2><p>기존 경기를 유지하면서 신규 경기 개설을 제어합니다.</p>'+form('matches_enabled','',valueField(setting('matches_enabled','1')==='1'?'0':'1'),setting('matches_enabled','1')==='1'?'신규 접수 중단':'신규 접수 허용')+'</section><section><h2>게임별 설정</h2>'+table(['게임','공식 값 범위','신규 개설','관리'],Object.entries(games).map(([g,v])=>tr([g+' '+v[0],'1~'+v[1],gameEnabled(g)?'사용':'중단'],'<td>'+form('game',g,valueField(gameEnabled(g)?'0':'1'),gameEnabled(g)?'비활성화':'활성화')+'</td>')))+'<p>무료 대전만 지원합니다. 슬롯은 원시 값 비교이며 조합 판정은 미구현입니다.</p></section>';}
-if(tab==='bot'){content='<section><h2>연결 정보</h2><p>공식 봇: @'+esc(username)+'<br>웹훅: '+(webhookReady?'정상':'미연결')+'<br>API ID / HASH: '+(process.env.TELEGRAM_API_ID&&process.env.TELEGRAM_API_HASH?'등록 완료':'미등록')+'<br>시작 이미지: '+(process.env.WELCOME_PHOTO_FILE_ID?'등록 완료':'확인 필요')+'<br>마지막 오류: '+esc(lastError||'없음')+'</p><p>계정 로그인 및 자동 그룹 생성은 미연동입니다. 비밀값은 표시하지 않습니다.</p></section><section><h2>시작 화면 문구</h2>'+form('welcome_caption','', '<textarea name="value" maxlength="900" rows="7" required>'+esc(setting('welcome_caption','⚜️ GLORY ARENA\n승부의 끝, 영광의 시작.\n\n당신의 다음 승부를 시작하세요.\n매치를 개설하거나 대기실에서 상대를 만나보세요.\n\n1vs1 무료 대전 · 텔레그램 공식 게임'))+'</textarea>','문구 저장')+'</section>';}
+if(tab==='bot'){content='<section><h2>연결 정보</h2><p>공식 봇: @'+esc(username)+'<br>웹훅: '+(webhookReady?'정상':'미연결')+'<br>API ID / HASH: '+(process.env.TELEGRAM_API_ID&&process.env.TELEGRAM_API_HASH?'등록 완료':'미등록')+'<br>시작 이미지: '+(one("SELECT value FROM welcome_settings WHERE key='photo'")?.value?'새 봇용 이미지 등록됨':process.env.WELCOME_PHOTO_FILE_ID?'기존 이미지 ID 등록됨 · 새 봇에서 재등록 필요':'미등록')+'<br>마지막 오류: '+esc(lastError||'없음')+'</p><p>계정 로그인 및 자동 그룹 생성은 미연동입니다. 비밀값은 표시하지 않습니다.</p></section><section><h2>시작 화면 문구</h2>'+form('welcome_caption','', '<textarea name="value" maxlength="900" rows="7" required>'+esc(setting('welcome_caption','⚜️ GLORY ARENA\n승부의 끝, 영광의 시작.\n\n당신의 다음 승부를 시작하세요.\n매치를 개설하거나 대기실에서 상대를 만나보세요.\n\n1vs1 무료 대전 · 텔레그램 공식 게임'))+'</textarea>','문구 저장')+'</section><section><h2>시작 이미지 변경</h2><p>텔레그램 봇을 변경했다면 기존 사진 ID가 무효가 됩니다. 새 봇에서 등록해야 합니다.</p>'+form('banner_generate','','사진 등록 코드 발급')+'</section>';}
 
 if(tab==='telegram'){
 const a=telegramAuth.info();
