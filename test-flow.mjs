@@ -50,6 +50,7 @@ const startPrompt=progress.find(m=>m.user===-10012001200&&m.message.includes('�
 assert(startPrompt.keyboard?.flat().some(b=>b.callback_data?.startsWith('dice:')),'group match start includes immediate one-tap dice action');
 const match=db.prepare('SELECT * FROM matches WHERE id=?').get(get().match_id);
 assert.equal(match.state,'active');assert.equal(match.game,'🎯');assert.equal(match.turn,1001);
+db.prepare("UPDATE matches SET state='finished' WHERE id=?").run(get().match_id);
 flow.finished(-10012001200);assert.equal(get().status,'finished');
 assert.equal(rooms.get(rcode).status,'finished');
 const finishMessage=messages.findLast(m=>m.user===-10012001200&&m.message.includes('추가 경기를 계속'));
