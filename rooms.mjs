@@ -3,7 +3,7 @@ import { Api } from 'telegram';
 
 export function createRoomService(db,telegramAuth,botUsername,send){
   db.exec("CREATE TABLE IF NOT EXISTS generated_rooms(code TEXT PRIMARY KEY, owner INTEGER NOT NULL, chat INTEGER UNIQUE, title TEXT, link TEXT, status TEXT NOT NULL, error TEXT, created INTEGER NOT NULL)");
-  for(const [col,type] of [['guest','INTEGER'],['link_guest','TEXT'],['request_code','TEXT']]){
+  for(const [col,type] of [['guest','INTEGER'],['link_guest','TEXT'],['request_code','TEXT'],['access_hash','TEXT']]){
     try{db.exec('ALTER TABLE generated_rooms ADD COLUMN '+col+' '+type);}catch(e){if(!String(e.message).includes('duplicate column name'))throw e;}
   }
   const one=(q,...p)=>db.prepare(q).get(...p);
@@ -48,7 +48,7 @@ export function createRoomService(db,telegramAuth,botUsername,send){
         if(!channel)throw Error('GROUP_CREATE_FAILED');
         chat=Number('-100'+String(channel.id));
         if(!Number.isSafeInteger(chat))throw Error('GROUP_ID_INVALID');
-        run("UPDATE generated_rooms SET chat=?,title=? WHERE code=?",chat,'GLORY ARENA '+job.code,job.code);
+        run("UPDATE generated_rooms SET chat=?,title=?,access_hash=? WHERE code=?",chat,'GLORY ARENA '+job.code,String(channel.accessHash||''),job.code);
         const peer=await c.getInputEntity(channel);
         const bot=await c.getInputEntity('@'+botUsername);
         try{await c.invoke(new Api.channels.InviteToChannel({channel:peer,users:[bot]}));}
@@ -83,8 +83,10 @@ export function createRoomService(db,telegramAuth,botUsername,send){
     run("UPDATE generated_rooms SET status='closing' WHERE code=?",code);
     try{
       await telegramAuth.withClient(async client=>{
-        const peer=await client.getInputEntity(room.chat);
-        await client.invoke(new Api.channels.DeleteChannel({channel:peer}));
+        let channel;
+        if(room.access_hash){const channelId=String(room.chat).replace(/^-100/,'');channel=new Api.InputChannel({channelId:BigInt(channelId),accessHash:BigInt(room.access_hash)});}
+        else{await client.getDialogs({limit:100});const peer=await client.getInputEntity(room.chat);channel=peer;}
+        await client.invoke(new Api.channels.DeleteChannel({channel}));
       });
       run("UPDATE generated_rooms SET status='closed',link=NULL,link_guest=NULL,error=NULL WHERE code=?",code);
       return true;
