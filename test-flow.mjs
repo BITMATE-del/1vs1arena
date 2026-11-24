@@ -4,18 +4,19 @@ import { createMatchFlow } from './match-flow.mjs';
 
 const db=new DatabaseSync(':memory:');
 db.exec("CREATE TABLE arena_users(id INTEGER PRIMARY KEY,name TEXT,username TEXT,blocked INTEGER DEFAULT 0);CREATE TABLE matches(id INTEGER PRIMARY KEY,chat INTEGER,owner INTEGER,guest INTEGER,game TEXT,mode TEXT,rounds INTEGER,state TEXT,turn INTEGER,round INTEGER DEFAULT 1,a INTEGER DEFAULT 0,b INTEGER DEFAULT 0)");
+db.exec("CREATE TABLE generated_rooms(code TEXT PRIMARY KEY,chat INTEGER,status TEXT,link TEXT,link_guest TEXT)");
 db.prepare("INSERT INTO arena_users(id,name,username) VALUES(?,?,?)").run(1001,'첫 번째 회원','firstuser');
 db.prepare("INSERT INTO arena_users(id,name,username) VALUES(?,?,?)").run(1002,'두 번째 회원','seconduser');
 const messages=[],rooms=new Map(),events=new Map();
 const send=(user,message,keyboard)=>messages.push({user,message,keyboard});
 const fakeRoom={
   connected:()=>true,
-  requestPair:(data,onReady,onFailed)=>{const code='R-'+data.code;rooms.set(code,{code,chat:-10012001200,status:'ready',link:'https://t.me/+owner',link_guest:'https://t.me/+guest'});events.set(code,{data,onReady,onFailed});return code;},
+  requestPair:(data,onReady,onFailed)=>{const code='R-'+data.code;rooms.set(code,{code,chat:-10012001200,status:'ready',link:'https://t.me/+owner',link_guest:'https://t.me/+guest'});db.prepare("INSERT INTO generated_rooms(code,chat,status,link,link_guest) VALUES(?,?,?,?,?)").run(code,-10012001200,'ready','https://t.me/+owner','https://t.me/+guest');events.set(code,{data,onReady,onFailed});return code;},
   getByCode:code=>rooms.get(code),
   finish:code=>{const r=rooms.get(code);if(r)r.status='finished';}
 };
 const flow=createMatchFlow(db,send,fakeRoom,{'🎲':['다이스',6],'🎯':['다트',6]},{wins:'선승제',round:'매판 승패'},[1,3,5],{gameEnabled:()=>true});
-const get=()=>db.prepare("SELECT * FROM match_requests ORDER BY created DESC LIMIT 1").get();
+const get=()=>db.prepare("SELECT * FROM match_requests ORDER BY rowid DESC LIMIT 1").get();
 function act(user,chat,parts){assert.equal(flow.onCallback(user,chat,parts),true);}
 flow.begin(1001);
 assert.equal(flow.onText(1001,'@seconduser'),true);
