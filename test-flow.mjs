@@ -13,7 +13,9 @@ const fakeRoom={
   connected:()=>true,
   requestPair:(data,onReady,onFailed)=>{const code='R-'+data.code;rooms.set(code,{code,chat:-10012001200,status:'ready',link:'https://t.me/+owner',link_guest:'https://t.me/+guest'});db.prepare("INSERT INTO generated_rooms(code,chat,status,link,link_guest) VALUES(?,?,?,?,?)").run(code,-10012001200,'ready','https://t.me/+owner','https://t.me/+guest');events.set(code,{data,onReady,onFailed});return code;},
   getByCode:code=>rooms.get(code),
-  finish:code=>{const r=rooms.get(code);if(r)r.status='finished';}
+  finish:code=>{const r=rooms.get(code);if(r)r.status='finished';},
+  reopen:code=>{const r=rooms.get(code);if(r)r.status='ready';},
+  close:async code=>{const r=rooms.get(code);if(r)r.status='closed';return true;}
 };
 const flow=createMatchFlow(db,send,fakeRoom,{'🎲':['다이스',6],'🎯':['다트',6]},{wins:'선승제',round:'매판 승패'},[1,3,5],{gameEnabled:()=>true});
 const get=()=>db.prepare("SELECT * FROM match_requests ORDER BY rowid DESC LIMIT 1").get();
@@ -50,6 +52,20 @@ const match=db.prepare('SELECT * FROM matches WHERE id=?').get(get().match_id);
 assert.equal(match.state,'active');assert.equal(match.game,'🎯');assert.equal(match.turn,1001);
 flow.finished(-10012001200);assert.equal(get().status,'finished');
 assert.equal(rooms.get(rcode).status,'finished');
+const finishMessage=messages.findLast(m=>m.user===-10012001200&&m.message.includes('추가 경기를 계속'));
+assert(finishMessage?.keyboard?.flat().some(b=>b.callback_data?.includes(':yes')),'ask both players to rematch');
+act(1001,-10012001200,['mf','again',row.code,'yes']);assert.equal(flow.votesFor(row.code).owner_vote,'yes');
+act(1001,-10012001200,['mf','again',row.code,'yes']);assert.equal(flow.votesFor(row.code).guest_vote,null,'repeat owner vote cannot count for guest');
+act(1002,-10012001200,['mf','again',row.code,'yes']);assert.equal(get().status,'playing');
+const rematch=db.prepare('SELECT * FROM matches WHERE id=?').get(get().match_id);
+assert.notEqual(rematch.id,match.id,'rematch is a separate historic match');
+assert.equal(rematch.state,'active');assert.equal(rematch.a,0);assert.equal(rematch.b,0);assert.equal(rooms.get(rcode).status,'ready');
+flow.finished(-10012001200);assert.equal(get().status,'finished');
+act(1001,-10012001200,['mf','again',row.code,'no']);assert.equal(flow.votesFor(row.code).state,'voting');
+act(1002,-10012001200,['mf','again',row.code,'no']);assert.equal(flow.votesFor(row.code).state,'closing');
+await flow.processClose(row.code);
+assert.equal(flow.votesFor(row.code).state,'closed');
+assert.equal(rooms.get(rcode).status,'closed');
 flow.begin(1001);assert.equal(flow.onText(1001,'@unknownuser'),true);
 flow.onCallback(1001,1001,['mf','public']);const pub=get();assert.equal(pub.source,'direct');
 act(1001,1001,['mf','game',pub.code,'🎲']);
