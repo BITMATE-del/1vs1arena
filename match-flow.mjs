@@ -225,6 +225,7 @@ export function createMatchFlow(db, send, roomService, games, modes, rounds, opt
       if(r.guest)send(r.guest,'✅ '+code+' 대전방이 종료되었습니다.');
     }catch(e){
       run("UPDATE match_continue_votes SET state='close_failed',last_error='GROUP_CLOSE_FAILED',updated=? WHERE code=?",Date.now(),code);
+      options.onCloseFailed?.(r?.match_id,code);
       console.warn('Match cleanup failed',{code,reason:String(e?.errorMessage||e?.message||'error').replace(/\\+?\\d{8,}/g,'[redacted]').slice(0,80)});
     }finally{closingInProgress.delete(code);}
   }
