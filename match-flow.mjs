@@ -132,6 +132,17 @@ export function createMatchFlow(db, send, roomService, games, modes, rounds, opt
       console.warn('Resume invite failed',{code,reason:String(e?.errorMessage||e?.message||'error').slice(0,65)});
     }
   }
+  function closeFinishedForAdmin(code){
+    const r=get(code);
+    if(!r||!r.room_code||r.status!=='finished')return false;
+    const room=roomService.getByCode(r.room_code),v=votesFor(code);
+    if(!room?.chat||room.status==='closed'||v?.state==='closed')return false;
+    if(v?.state==='closing')return true;
+    const now=Date.now();
+    run("INSERT INTO match_continue_votes(code,deadline,close_after,state,updated) VALUES(?,?,?,'closing',?) ON CONFLICT(code) DO UPDATE SET close_after=excluded.close_after,state='closing',last_error=NULL,updated=excluded.updated",code,now,now+12000,now);
+    send(room.chat,'✅ 종료된 경기를 정리합니다.\n기존 승패와 점수는 그대로 보존되며 전용 그룹은 잠시 후 종료됩니다.');
+    return true;
+  }
   function forceCloseForAdmin(code){
     const r=get(code);if(!r)return false;
     const room=r.room_code?roomService.getByCode(r.room_code):null;
@@ -170,6 +181,10 @@ export function createMatchFlow(db, send, roomService, games, modes, rounds, opt
     const pending=all("SELECT * FROM match_requests WHERE status='room_pending' LIMIT 20");for(const r of pending){const room=roomService.getByCode(r.room_code||('R-'+r.code));if(room?.status==='ready'&&room.link&&room.link_guest)groupReady(r.code,{chat:room.chat,linkOwner:room.link,linkGuest:room.link_guest,code:room.code});else if(room?.status==='failed')groupFailed(r.code);}
     for(const row of all("SELECT * FROM match_stop_requests WHERE state='pending' AND expires<? LIMIT 20",Date.now())){run("UPDATE match_stop_requests SET state='expired',updated=? WHERE code=? AND state='pending'",Date.now(),row.code);const room=get(row.code)?.room_code?roomService.getByCode(get(row.code).room_code):null;if(room?.chat)send(room.chat,'⌛ 중도 종료 요청이 만료됐습니다. 경기는 계속 진행됩니다.');}
     for(const row of all("SELECT * FROM match_continue_votes WHERE state='voting' AND deadline<? LIMIT 20",Date.now())){const r=get(row.code);if(r)closeDecision(r,'timeout');}
+    // Recover legacy completed matches which lost the rematch-vote row. Only
+    // automatically clean up after the finished request has aged beyond the vote window.
+    const oldFinished=all("SELECT q.code FROM match_requests q JOIN generated_rooms g ON g.code=q.room_code LEFT JOIN match_continue_votes v ON v.code=q.code WHERE q.status='finished' AND q.updated<? AND v.code IS NULL AND g.status='finished' LIMIT 5",Date.now()-15*60000);
+    for(const r of oldFinished)closeFinishedForAdmin(r.code);
     for(const row of all("SELECT code FROM match_continue_votes WHERE state='closing' AND close_after<=? LIMIT 10",Date.now()))void processClose(row.code);
   }
   function finished(chat){
@@ -231,5 +246,5 @@ export function createMatchFlow(db, send, roomService, games, modes, rounds, opt
   }
 
   function cancelForAdmin(code){const r=get(code);if(!r||['finished','cancelled','expired'].includes(r.status))return false;run("UPDATE match_requests SET status='cancelled',updated=? WHERE code=?",Date.now(),code);if(r.match_id)run("UPDATE matches SET state='cancelled' WHERE id=? AND state!='finished'",r.match_id);send(r.owner,'운영자에 의해 대전이 중단됐습니다: '+code);if(r.guest)send(r.guest,'운영자에 의해 대전이 중단됐습니다: '+code);return true;}
-  return {sendMain,tutorial,begin,lobby,mine,onText,onCallback,tick,finished,cancelForAdmin,forceCloseForAdmin,stopByChat,timeoutMatch,retryCloseForAdmin,resume,get,config,votesFor,stopFor,processClose};
+  return {sendMain,tutorial,begin,lobby,mine,onText,onCallback,tick,finished,cancelForAdmin,forceCloseForAdmin,stopByChat,timeoutMatch,retryCloseForAdmin,closeFinishedForAdmin,resume,get,config,votesFor,stopFor,processClose};
 }
