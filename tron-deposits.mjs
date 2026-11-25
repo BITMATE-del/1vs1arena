@@ -29,6 +29,17 @@ export function normalizeTransfer(t,address,since){
 }
 export function createTronDeposits(db,send,options={}){
   db.exec("CREATE TABLE IF NOT EXISTS tron_deposit_addresses(user_id INTEGER PRIMARY KEY,address TEXT UNIQUE NOT NULL,active_from INTEGER NOT NULL,created INTEGER NOT NULL);CREATE TABLE IF NOT EXISTS tron_deposits(txid TEXT NOT NULL,user_id INTEGER NOT NULL,address TEXT NOT NULL,amount_micro INTEGER NOT NULL,source TEXT NOT NULL,block_time INTEGER NOT NULL,credited INTEGER NOT NULL,PRIMARY KEY(txid,address));CREATE TABLE IF NOT EXISTS tron_wallets(user_id INTEGER PRIMARY KEY,balance_micro INTEGER NOT NULL DEFAULT 0 CHECK(balance_micro>=0),updated INTEGER NOT NULL);CREATE TABLE IF NOT EXISTS tron_monitor_events(id INTEGER PRIMARY KEY AUTOINCREMENT,at INTEGER NOT NULL,kind TEXT NOT NULL,detail TEXT NOT NULL)");
+  const legacyPk=db.prepare("PRAGMA table_info(tron_deposits)").all().filter(x=>x.pk>0);
+  if(legacyPk.length===1&&legacyPk[0].name==='txid'){
+    db.exec('BEGIN IMMEDIATE');
+    try{
+      db.exec("ALTER TABLE tron_deposits RENAME TO tron_deposits_legacy_v1");
+      db.exec("CREATE TABLE tron_deposits(txid TEXT NOT NULL,user_id INTEGER NOT NULL,address TEXT NOT NULL,amount_micro INTEGER NOT NULL,source TEXT NOT NULL,block_time INTEGER NOT NULL,credited INTEGER NOT NULL,PRIMARY KEY(txid,address))");
+      db.exec("INSERT INTO tron_deposits SELECT txid,user_id,address,amount_micro,source,block_time,credited FROM tron_deposits_legacy_v1");
+      db.exec("DROP TABLE tron_deposits_legacy_v1");
+      db.exec('COMMIT');
+    }catch(e){db.exec('ROLLBACK');throw e;}
+  }
   const one=(sql,...p)=>db.prepare(sql).get(...p),all=(sql,...p)=>db.prepare(sql).all(...p),run=(sql,...p)=>db.prepare(sql).run(...p);
   const now=options.now||Date.now;
   const apiKey=options.apiKey??process.env.TRONGRID_API_KEY??'';
