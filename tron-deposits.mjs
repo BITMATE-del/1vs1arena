@@ -28,7 +28,7 @@ export function normalizeTransfer(t,address,since){
   return {txid:tx.toLowerCase(),amount:value,from:String(t.from),timestamp};
 }
 export function createTronDeposits(db,send,options={}){
-  db.exec("CREATE TABLE IF NOT EXISTS tron_deposit_addresses(user_id INTEGER PRIMARY KEY,address TEXT UNIQUE NOT NULL,active_from INTEGER NOT NULL,created INTEGER NOT NULL);CREATE TABLE IF NOT EXISTS tron_deposits(txid TEXT PRIMARY KEY,user_id INTEGER NOT NULL,address TEXT NOT NULL,amount_micro INTEGER NOT NULL,source TEXT NOT NULL,block_time INTEGER NOT NULL,credited INTEGER NOT NULL);CREATE TABLE IF NOT EXISTS tron_wallets(user_id INTEGER PRIMARY KEY,balance_micro INTEGER NOT NULL DEFAULT 0 CHECK(balance_micro>=0),updated INTEGER NOT NULL);CREATE TABLE IF NOT EXISTS tron_monitor_events(id INTEGER PRIMARY KEY AUTOINCREMENT,at INTEGER NOT NULL,kind TEXT NOT NULL,detail TEXT NOT NULL)");
+  db.exec("CREATE TABLE IF NOT EXISTS tron_deposit_addresses(user_id INTEGER PRIMARY KEY,address TEXT UNIQUE NOT NULL,active_from INTEGER NOT NULL,created INTEGER NOT NULL);CREATE TABLE IF NOT EXISTS tron_deposits(txid TEXT NOT NULL,user_id INTEGER NOT NULL,address TEXT NOT NULL,amount_micro INTEGER NOT NULL,source TEXT NOT NULL,block_time INTEGER NOT NULL,credited INTEGER NOT NULL,PRIMARY KEY(txid,address));CREATE TABLE IF NOT EXISTS tron_wallets(user_id INTEGER PRIMARY KEY,balance_micro INTEGER NOT NULL DEFAULT 0 CHECK(balance_micro>=0),updated INTEGER NOT NULL);CREATE TABLE IF NOT EXISTS tron_monitor_events(id INTEGER PRIMARY KEY AUTOINCREMENT,at INTEGER NOT NULL,kind TEXT NOT NULL,detail TEXT NOT NULL)");
   const one=(sql,...p)=>db.prepare(sql).get(...p),all=(sql,...p)=>db.prepare(sql).all(...p),run=(sql,...p)=>db.prepare(sql).run(...p);
   const now=options.now||Date.now;
   const apiKey=options.apiKey??process.env.TRONGRID_API_KEY??'';
@@ -55,10 +55,10 @@ export function createTronDeposits(db,send,options={}){
     if(!enabled())return false;
     const assigned=one('SELECT address,active_from FROM tron_deposit_addresses WHERE user_id=?',user);
     if(!assigned||assigned.address!==address||transfer.timestamp<assigned.active_from)return false;
-    if(one('SELECT txid FROM tron_deposits WHERE txid=?',transfer.txid))return false;
+    if(one('SELECT txid FROM tron_deposits WHERE txid=? AND address=?',transfer.txid,address))return false;
     const amount=BigInt(transfer.amount),max=9223372036854775807n;
     const current=BigInt(balance(user));
-    if(amount<=0n||current+amount>max)throw Error('BALANCE_LIMIT');
+    if(amount<=0n||amount>BigInt(Number.MAX_SAFE_INTEGER)||current+amount>BigInt(Number.MAX_SAFE_INTEGER))throw Error('BALANCE_LIMIT');
     db.exec('SAVEPOINT credit_tron');
     try{
       run('INSERT INTO tron_deposits(txid,user_id,address,amount_micro,source,block_time,credited) VALUES(?,?,?,?,?,?,?)',transfer.txid,user,address,Number(amount),transfer.from,transfer.timestamp,now());
@@ -80,7 +80,7 @@ export function createTronDeposits(db,send,options={}){
   async function scan(row){
     const pending=[];let cursor='',end=false;
     for(let page=0;page<12;page++){
-      const query=new URLSearchParams({only_to:'true',only_confirmed:'true',limit:'200',order_by:'block_timestamp,desc',min_timestamp:String(row.active_from)});
+      const query=new URLSearchParams({only_to:'true',only_confirmed:'true',limit:'200',order_by:'block_timestamp,desc',min_timestamp:String(row.active_from),contract_address:USDT_TRON});
       if(cursor)query.set('fingerprint',cursor);
       const r=await queryJson('/v1/accounts/'+encodeURIComponent(row.address)+'/transactions/trc20?'+query);
       if(!Array.isArray(r.data)||r.success===false)throw Error('TRONGRID_INVALID_RESPONSE');
@@ -100,7 +100,7 @@ export function createTronDeposits(db,send,options={}){
     let credited=0;
     for(const t of pending.reverse()){
       if(count.get(t.txid)!==1){log('ambiguous_transfer','txid='+t.txid);continue;}
-      if(one('SELECT 1 FROM tron_deposits WHERE txid=?',t.txid))continue;
+      if(one('SELECT 1 FROM tron_deposits WHERE txid=? AND address=?',t.txid,row.address))continue;
       if(!await solid(t.txid))continue;
       if(credit(row.user_id,row.address,t))credited++;
     }
