@@ -181,9 +181,13 @@ export function createMatchFlow(db, send, roomService, games, modes, rounds, opt
     const pending=all("SELECT * FROM match_requests WHERE status='room_pending' LIMIT 20");for(const r of pending){const room=roomService.getByCode(r.room_code||('R-'+r.code));if(room?.status==='ready'&&room.link&&room.link_guest)groupReady(r.code,{chat:room.chat,linkOwner:room.link,linkGuest:room.link_guest,code:room.code});else if(room?.status==='failed')groupFailed(r.code);}
     for(const row of all("SELECT * FROM match_stop_requests WHERE state='pending' AND expires<? LIMIT 20",Date.now())){run("UPDATE match_stop_requests SET state='expired',updated=? WHERE code=? AND state='pending'",Date.now(),row.code);const room=get(row.code)?.room_code?roomService.getByCode(get(row.code).room_code):null;if(room?.chat)send(room.chat,'⌛ 중도 종료 요청이 만료됐습니다. 경기는 계속 진행됩니다.');}
     for(const row of all("SELECT * FROM match_continue_votes WHERE state='voting' AND deadline<? LIMIT 20",Date.now())){const r=get(row.code);if(r)closeDecision(r,'timeout');}
+    // Repair a completed game's request state when the match result was saved
+    // before a crash, without recalculating the winner or changing scores.
+    const stalePlaying=all("SELECT q.code,g.chat FROM match_requests q JOIN matches m ON m.id=q.match_id JOIN generated_rooms g ON g.code=q.room_code WHERE q.status='playing' AND m.state='finished' AND q.updated<? AND g.status IN ('ready','finished') LIMIT 5",Date.now()-60000);
+    for(const item of stalePlaying)finished(item.chat);
     // Recover legacy completed matches which lost the rematch-vote row. Only
     // automatically clean up after the finished request has aged beyond the vote window.
-    const oldFinished=all("SELECT q.code FROM match_requests q JOIN generated_rooms g ON g.code=q.room_code LEFT JOIN match_continue_votes v ON v.code=q.code WHERE q.status='finished' AND q.updated<? AND v.code IS NULL AND g.status='finished' LIMIT 5",Date.now()-15*60000);
+    const oldFinished=all("SELECT q.code FROM match_requests q JOIN generated_rooms g ON g.code=q.room_code JOIN matches m ON m.id=q.match_id LEFT JOIN match_continue_votes v ON v.code=q.code WHERE q.status='finished' AND m.state='finished' AND q.updated<? AND v.code IS NULL AND g.status IN ('ready','finished') AND NOT EXISTS (SELECT 1 FROM matches active WHERE active.chat=g.chat AND active.state='active') LIMIT 5",Date.now()-15*60000);
     for(const r of oldFinished)closeFinishedForAdmin(r.code);
     for(const row of all("SELECT code FROM match_continue_votes WHERE state='closing' AND close_after<=? LIMIT 10",Date.now()))void processClose(row.code);
   }
