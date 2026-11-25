@@ -1,0 +1,18 @@
+import assert from 'node:assert/strict';
+import {resultForMatch,managedRoomStatus} from './admin-results.mjs';
+const sample={id:1,owner:1001,guest:1002,a:2,b:1,state:'finished'};
+const user={owner:'@player_one',guest:'@player_two'};
+assert.deepEqual(resultForMatch(sample,user),{state:'종료',result:'개설자 승리',winner:'@player_one',detail:'@player_one 2 : 1 @player_two',kind:'win'});
+assert.equal(resultForMatch({...sample,a:1,b:2},user).winner,'@player_two');
+assert.equal(resultForMatch({...sample,a:1,b:1},user).winner,'무승부');
+assert.equal(resultForMatch({...sample,state:'cancelled'},user).winner,'없음');
+assert.equal(resultForMatch({...sample,state:'active'},user).result,'판정 대기');
+assert.equal(resultForMatch({...sample,state:'waiting'},user).kind,'pending');
+assert.equal(managedRoomStatus({generated_status:'closed',enabled:1}).label,'종료 · 삭제 확인');
+assert.equal(managedRoomStatus({generated_status:'finished',latest_match_state:'finished',open:0}).kind,'finished');
+assert.equal(managedRoomStatus({generated_status:'ready',request_status:'finished',open:0}).kind,'finished');
+assert.equal(managedRoomStatus({generated_status:'close_failed',open:0}).kind,'error');
+assert.equal(managedRoomStatus({close_state:'closing',open:0}).kind,'closing');
+assert.equal(managedRoomStatus({generated_status:'ready',request_status:'playing',open:1}).kind,'active');
+assert.notEqual(managedRoomStatus({generated_status:'ready',latest_match_state:'finished',open:0}).kind,'closed');
+console.log('GLORY ARENA admin result and room lifecycle tests PASS');
