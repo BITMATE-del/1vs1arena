@@ -1,0 +1,58 @@
+import assert from 'node:assert/strict';
+import {DatabaseSync} from 'node:sqlite';
+import {createHash} from 'node:crypto';
+import {createTronDeposits,validTronAddress,normalizeTransfer,usdtDisplay,USDT_TRON} from './tron-deposits.mjs';
+const alphabet='123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
+function makeAddress(seed){
+ const data=Buffer.concat([Buffer.from([0x41]),Buffer.alloc(20,seed)]);
+ const sha=x=>createHash('sha256').update(x).digest();
+ const bytes=Buffer.concat([data,sha(sha(data)).subarray(0,4)]);
+ let n=BigInt('0x'+bytes.toString('hex')),text='';
+ while(n>0n){text=alphabet[Number(n%58n)]+text;n/=58n;}
+ return text;
+}
+const a=makeAddress(1),b=makeAddress(2);
+assert(validTronAddress(a)&&validTronAddress(b));
+assert(!validTronAddress(a.slice(0,-1)+'0'),'checksum invalid');
+assert(!validTronAddress(USDT_TRON),'token contract not deposit');
+assert.equal(usdtDisplay('12345678'),'12.345678');
+const db=new DatabaseSync(':memory:');
+db.exec("CREATE TABLE arena_users(id INTEGER PRIMARY KEY,name TEXT);INSERT INTO arena_users VALUES(11,'test1'),(12,'test2')");
+let timestamp=1900000000000,active=true,apiCalls=0;
+const txid='a'.repeat(64),tx2='b'.repeat(64);
+let transfers=[];
+const fetched=async (url,opts)=>{
+ apiCalls++;
+ if(url.includes('/transactions/trc20'))return {ok:true,json:async()=>({success:true,data:transfers,meta:{}})};
+ if(url.includes('/walletsolidity/gettransactioninfobyid'))return {ok:true,json:async()=>({id:JSON.parse(opts.body).value,receipt:{result:'SUCCESS'}})};
+ throw Error('Unexpected '+url);
+};
+const notifications=[];
+const service=createTronDeposits(db,(user,message)=>notifications.push({user,message}),{apiKey:'testing',enabled:()=>active,now:()=>timestamp,fetcher:fetched});
+assert(service.assign(11,a));
+assert(!service.assign(12,a),'address cannot be reused by a second member');
+assert(!service.assign(13,b),'unregistered members cannot have address');
+assert(!service.assign(12,'not-valid'),'bad address rejected');
+assert(service.assign(12,b));
+const event=(tx,address,value,contract=USDT_TRON)=>({transaction_id:tx,to:address,from:makeAddress(4),value,block_timestamp:timestamp+1000,token_info:{address:contract,decimals:6}});
+assert.equal(normalizeTransfer(event(txid,a,'9000000'),a,timestamp).amount,'9000000');
+assert.equal(normalizeTransfer(event(txid,a,'9000000','TFAKE'),a,timestamp),null);
+assert.equal(normalizeTransfer(event(txid,b,'9000000'),a,timestamp),null);
+assert.equal(normalizeTransfer(event(txid,a,'9000000'),a,timestamp+2000),null);
+transfers=[event(txid,a,'9000000'),event(tx2,a,'1000001','TFAKE')];
+assert.equal((await service.poll()).credited,1);
+assert.equal(service.balance(11),'9000000');
+assert.equal(notifications.length,1);
+assert.equal(notifications[0].user,11);
+assert.equal((await service.poll()).credited,0,'webhook/indexer replay is idempotent');
+assert.equal(notifications.length,1);
+assert.equal(db.prepare('SELECT COUNT(*) n FROM tron_deposits').get().n,1);
+assert(!service.assign(11,b),'cannot change credited account address');
+assert.equal(service.history(11).length,1);
+active=false;
+transfers=[event(tx2,a,'1000000')];
+const before=apiCalls;
+assert.equal((await service.poll()).active,false,'disabled watcher never hits network');
+assert.equal(apiCalls,before);
+assert.equal(service.balance(11),'9000000');
+console.log('GLORY ARENA TronGrid USDT deposit tests PASS: checksum, chain/contract, confirmed transactions, unique assignments, atomic credit, replay protection, disable switch');
