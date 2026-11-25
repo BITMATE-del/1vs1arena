@@ -203,7 +203,7 @@ if(path==='/admin/login'&&req.method==='POST'){const ip=String(req.headers['x-re
 if(path==='/admin/logout'&&req.method==='POST'){res.writeHead(303,{'location':'/admin','set-cookie':'ga_admin=; Path=/admin; HttpOnly; Secure; SameSite=Strict; Max-Age=0'}).end();return true;}
 
 if(!adminAuth(req)){if(req.method!=='GET'){res.writeHead(403).end();return true;}adminPage(res,'<section class="login"><h1>GLORY ARENA</h1><p>관리자 전용 로그인</p><form method="post" action="/admin/login"><label>관리자 비밀번호<input type="password" name="password" required autocomplete="current-password"></label><button>로그인</button></form></section>');return true;}
-const sections={overview:'대시보드',users:'회원 관리',rooms:'방 관리',matches:'경기 관리',records:'판정 기록',games:'게임 설정',telegram:'텔레그램 계정 관리',requests:'대전 신청 관리',operations:'운영 안정성',bot:'봇 설정',audit:'운영 로그'};
+const sections={overview:'대시보드',users:'회원 관리',rooms:'방 관리',matches:'경기 관리',records:'판정 기록',games:'게임 설정',telegram:'텔레그램 계정 관리',requests:'대전 신청 관리',operations:'운영 안정성',deposits:'USDT 자동 입금',bot:'봇 설정',audit:'운영 로그'};
 const url=new URL(req.url,base);
 const tab=Object.hasOwn(sections,url.searchParams.get('tab'))?url.searchParams.get('tab'):'overview';
 const csrf=createHash('sha256').update(secret+':csrf:'+String(req.headers.cookie||'')).digest('hex');
@@ -214,6 +214,17 @@ let raw='';for await(const chunk of req){raw+=chunk.toString();if(raw.length>120
 const q=new URLSearchParams(raw),provided=q.get('csrf')||'';
 if(!/^[a-f0-9]{64}$/.test(provided)||!timingSafeEqual(Buffer.from(provided),Buffer.from(csrf))){res.writeHead(403).end();return true;}
 const act=q.get('action'),id=Number(q.get('id')),value=q.get('value')||'';let changed=false;
+if(act==='tron_assign'){
+ const user=Number(q.get('user_id')),addr=(q.get('deposit_address')||'').trim();
+ const done=tronDeposits.assign(user,addr);
+ if(done)run('INSERT INTO admin_audit(at,action,target) VALUES(?,?,?)',Date.now(),'tron_assign',String(user));
+ res.writeHead(303,{location:'/admin?tab=deposits&saved='+Number(done)}).end();return true;
+}
+if(act==='tron_rescan'){
+ const state=await tronDeposits.poll().catch(e=>({error:String(e.message||e).slice(0,75)}));
+ if(state.credited)void drain();
+ res.writeHead(303,{location:'/admin?tab=deposits&saved='+Number(!state.error)}).end();return true;
+}
 if(act==='banner_generate'){
 const code=randomBytes(18).toString('base64url');
 const hash=createHash('sha256').update(code).digest('hex');
@@ -323,6 +334,21 @@ content='<section><h2>대전 신청 현황</h2><p>상대 확인, 신청 수락, 
 '<section><h2>대전 자동 진행 설정</h2><p>신청 수락 대기 시간(5~120분)</p>'+form('flow_minutes','', '<input type="number" name="value" min="5" max="120" value="'+esc(matchFlow.config('request_minutes','60'))+'">','저장')+'</section>'+
 '<section><h2>이용 안내 문구</h2>'+form('flow_guide','', '<textarea name="value" rows="9" maxlength="1800" required>'+esc(matchFlow.config('text_guide','📖 GLORY ARENA 이용 안내\n1. 상대를 지정하거나 대기실에서 신청\n2. 상대방 수락\n3. 전용 비공개 그룹 생성\n4. 양측 준비 완료\n5. 공식 이모지 게임으로 대전\n모든 대전은 무료입니다.'))+'</textarea>','문구 저장')+'</section>'+
 '<section><h2>전용 그룹 공지 문구</h2>'+form('flow_room_notice','', '<textarea name="value" rows="9" maxlength="1800" required>'+esc(matchFlow.config('text_room_notice','📌 GLORY ARENA 경기 안내\n\n두 참가자 모두 공지를 확인하고 준비 완료를 눌러주세요.\n모든 대전은 무료입니다.'))+'</textarea>','문구 저장')+'</section>';
+}
+if(tab==='deposits'){
+const st=tronDeposits.status();
+const addr=all("SELECT d.user_id,d.address,d.active_from,u.username,u.name,COALESCE(w.balance_micro,0) AS balance_micro FROM tron_deposit_addresses d JOIN arena_users u ON u.id=d.user_id LEFT JOIN tron_wallets w ON w.user_id=d.user_id ORDER BY d.created DESC LIMIT 75");
+const tx=all("SELECT d.txid,d.user_id,d.amount_micro,d.block_time,d.credited FROM tron_deposits d ORDER BY d.credited DESC LIMIT 75");
+const errors=all("SELECT * FROM tron_monitor_events WHERE kind!='address_set' ORDER BY id DESC LIMIT 20");
+content='<div class="grid">'+[['감시 상태',st.enabled&&st.apiConfigured?'활성':'설정 대기'],['TronGrid API',st.apiConfigured?'설정됨':'미설정'],['등록된 주소',st.addressCount],['자동 충전 건수',st.credits]].map(([k,v])=>'<section><small>'+esc(k)+'</small><div class="metric">'+esc(v)+'</div></section>').join('')+'</div>'+
+'<section><h2>USDT/TRC20 자동 입금 설정</h2><p>Railway 환경변수 TRONGRID_API_KEY와 TRON_DEPOSITS_ENABLED=1을 설정해야 자동 감지가 작동합니다. TronGrid는 주소 생성 기능을 제공하지 않습니다. 회원별 입금주소는 관리자가 개별 배정해야 하며, 주소 배정 전에 발생한 거래는 자동 충전하지 않습니다. 다른 체인의 토큰이나 미확정 거래는 반영되지 않습니다.</p>'+
+'<p>마지막 확인: '+(st.lastChecked?date(st.lastChecked):'아직 없음')+' · 오류: '+esc(st.lastError||'없음')+'</p>'+
+form('tron_rescan','','지금 입금 재확인')+'</section>'+
+'<section><h2>회원별 입금주소 배정</h2><p>실제 본사가 통제하는 회원 전용 TRON 주소만 등록하세요. 개인키는 입력하지 않습니다. 동일 주소 중복 배정 및 주소 체크섬 오류를 차단합니다.</p>'+
+form('tron_assign','', '<input name="user_id" type="number" min="1" placeholder="회원 텔레그램 숫자 ID" required><input name="deposit_address" maxlength="34" placeholder="T로 시작하는 TRON 입금주소" required>','입금주소 배정')+'</section>'+
+'<section><h2>회원 지갑 현황</h2>'+table(['회원 ID','이름','입금주소','등록 시각','USDT 잔액'],addr.map(a=>tr([a.user_id,a.username?'@'+a.username:a.name,a.address,date(a.active_from),usdtDisplay(a.balance_micro)])))+'</section>'+
+'<section><h2>확정 입금 내역</h2>'+table(['거래 해시','회원 ID','충전 USDT','체인 시간','반영 시간'],tx.map(r=>tr([r.txid,r.user_id,usdtDisplay(r.amount_micro),date(r.block_time),date(r.credited)])))+'</section>'+
+'<section><h2>입금 감시 오류</h2>'+table(['시각','구분','내용'],errors.map(r=>tr([date(r.at),r.kind,r.detail])))+'</section>';
 }
 if(tab==='operations'){
 const summary=matchWatch.issueSummary();
