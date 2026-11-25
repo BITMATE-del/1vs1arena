@@ -201,6 +201,11 @@ adminPage(res,'<header><h1>GLORY ARENA 시작 이미지 등록</h1></header><sec
 }
 if(act==='mr_cancel'&&/^GA-[A-F0-9]{8}$/.test(String(q.get('code')||''))){const done=matchFlow.cancelForAdmin(q.get('code'));res.writeHead(303,{location:'/admin?tab=requests&saved='+Number(done)}).end();void drain();return true;}
 if(act==='close_retry'&&/^GA-[A-F0-9]{8}$/.test(String(q.get('code')||''))){const code=q.get('code');const done=matchFlow.retryCloseForAdmin(code);if(done)run('INSERT INTO admin_audit(at,action,target) VALUES(?,?,?)',Date.now(),'close_retry',code);res.writeHead(303,{location:'/admin?tab=operations&saved='+Number(done)}).end();void drain();return true;}
+if(act==='mr_finish_close'&&/^GA-[A-F0-9]{8}$/.test(String(q.get('code')||''))){
+const code=q.get('code'),done=matchFlow.closeFinishedForAdmin(code);
+if(done)run('INSERT INTO admin_audit(at,action,target) VALUES(?,?,?)',Date.now(),'close_finished_room',code);
+res.writeHead(303,{location:'/admin?tab=rooms&saved='+Number(done)}).end();void drain();return true;
+}
 if(act==='mr_force'&&/^GA-[A-F0-9]{8}$/.test(String(q.get('code')||''))){const code=q.get('code');const done=matchFlow.forceCloseForAdmin(code);if(done)run('INSERT INTO admin_audit(at,action,target) VALUES(?,?,?)',Date.now(),'force_match_close',code);res.writeHead(303,{location:'/admin?tab=requests&saved='+Number(done)}).end();void drain();return true;}
 if(['tg_send','tg_code','tg_password','tg_session','tg_verify','tg_logout','tg_cancel'].includes(act)){
 let result='ok';try{
@@ -259,7 +264,7 @@ if(tab==='rooms'){
 const rows=all("SELECT r.*, (SELECT COUNT(*) FROM matches m WHERE m.chat=r.id AND m.state IN ('waiting','requested','active')) AS open, (SELECT m.state FROM matches m WHERE m.chat=r.id ORDER BY id DESC LIMIT 1) AS latest_match_state, (SELECT g.status FROM generated_rooms g WHERE g.chat=r.id LIMIT 1) AS generated_status, (SELECT q.status FROM match_requests q JOIN generated_rooms g ON g.code=q.room_code WHERE g.chat=r.id ORDER BY q.updated DESC LIMIT 1) AS request_status, (SELECT v.state FROM match_continue_votes v JOIN match_requests q ON q.code=v.code JOIN generated_rooms g ON g.code=q.room_code WHERE g.chat=r.id ORDER BY v.updated DESC LIMIT 1) AS close_state, (SELECT q.code FROM match_requests q JOIN generated_rooms g ON g.code=q.room_code WHERE g.chat=r.id ORDER BY q.updated DESC LIMIT 1) AS match_code FROM arena_rooms r WHERE CAST(r.id AS TEXT) LIKE ? OR r.title LIKE ? ORDER BY r.last_seen DESC LIMIT 50 OFFSET ?",like,like,offset);
 content='<section><h2>전용 대전방 목록</h2><p>경기 종료와 텔레그램 그룹 삭제를 구분해 표시합니다. 삭제 확인 상태는 실제 삭제 성공 기록에 따라 결정됩니다. 일반 그룹 사용 중단은 방 삭제가 아닙니다.</p>'+finder()+table(['그룹 번호','그룹명','최근 접속','진행·대기','경기·방 상태','관리'],rows.map(r=>{
 const status=managedRoomStatus(r),canClose=r.match_code&&r.open===0&&['finished','cancelled','error'].includes(status.kind)&&status.kind!=='closed';
-return tr([r.id,r.title,date(r.last_seen),r.open,status.label],'<td>'+(canClose?form('mr_force','', '<input type="hidden" name="code" value="'+esc(r.match_code)+'">','종료 방 정리'):'')+form(r.enabled?'room_disable':'room_enable',r.id,'',r.enabled?'봇 중단':'봇 활성',r.enabled&&r.open?'disabled':'')+'</td>');
+return tr([r.id,r.title,date(r.last_seen),r.open,status.label],'<td>'+(canClose?form(r.request_status==='finished'?'mr_finish_close':'mr_force','', '<input type="hidden" name="code" value="'+esc(r.match_code)+'">','종료 방 정리'):'')+form(r.enabled?'room_disable':'room_enable',r.id,'',r.enabled?'봇 중단':'봇 활성',r.enabled&&r.open?'disabled':'')+'</td>');
 }))+paging()+'</section>';}
 if(tab==='matches'){
 const rows=all("SELECT m.*, a.name AS owner_name,a.username AS owner_username,b.name AS guest_name,b.username AS guest_username,q.code AS request_code, q.status AS request_status,g.status AS group_status FROM matches m LEFT JOIN arena_users a ON a.id=m.owner LEFT JOIN arena_users b ON b.id=m.guest LEFT JOIN match_requests q ON q.match_id=m.id LEFT JOIN generated_rooms g ON g.chat=m.chat WHERE CAST(m.id AS TEXT) LIKE ? OR CAST(m.chat AS TEXT) LIKE ? OR CAST(m.owner AS TEXT) LIKE ? OR m.state LIKE ? ORDER BY m.id DESC LIMIT 50 OFFSET ?",like,like,like,like,offset);
