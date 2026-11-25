@@ -152,5 +152,28 @@ assert.equal(flow.votesFor(completed.code).state,'closed');
 assert.equal(rooms.get('R-'+completed.code).status,'closed');
 assert.equal(get().status,'finished','finished request is not reclassified as cancelled');
 assert.equal(flow.closeFinishedForAdmin(completed.code),false,'closed groups cannot close twice');
+flow.onCallback(1001,1001,['mf','public']);const stale=get();
+act(1001,1001,['mf','game',stale.code,'🎲']);
+act(1001,1001,['mf','mode',stale.code,'wins']);
+act(1001,1001,['mf','round',stale.code,'1']);
+act(1001,1001,['mf','submit',stale.code]);
+act(1002,1002,['mf','join',stale.code]);
+act(1001,1001,['mf','accept',stale.code]);
+const staleRoom='R-'+stale.code;
+events.get(staleRoom).onReady(stale.code,{chat:-10012001200,code:staleRoom,linkOwner:'https://t.me/+owner',linkGuest:'https://t.me/+guest'});
+const staleMatch=get().match_id;
+db.prepare("UPDATE match_requests SET status='playing',updated=? WHERE code=?").run(Date.now()-3600000,stale.code);
+db.prepare("UPDATE matches SET state='finished',a=1,b=0 WHERE id=?").run(staleMatch);
+flow.tick();
+assert.equal(get().status,'finished','stuck playing is reconciled with persisted final match result');
+assert.equal(db.prepare('SELECT a FROM matches WHERE id=?').get(staleMatch).a,1,'repair preserves past score');
+db.prepare('DELETE FROM match_continue_votes WHERE code=?').run(stale.code);
+db.prepare("UPDATE match_requests SET updated=? WHERE code=?").run(Date.now()-3600000,stale.code);
+flow.tick();
+assert.equal(flow.votesFor(stale.code).state,'closing','orphan finished room is queued for closure');
+await flow.processClose(stale.code);
+assert.equal(flow.votesFor(stale.code).state,'closed');
+assert.equal(get().status,'finished');
+
 
 console.log('GLORY ARENA match-flow smoke tests PASS',messages.length,'messages queued');
