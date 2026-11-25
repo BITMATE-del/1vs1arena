@@ -1,7 +1,19 @@
+import {createHash} from 'node:crypto';
 // TRON USDT/TRC20 incoming transfer monitor. Read-only against the chain.
 // No private key is stored, and this module cannot send withdrawals.
 export const USDT_TRON='TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t';
 export function usdtDisplay(micro){const v=BigInt(micro),whole=v/1000000n,frac=String(v%1000000n).padStart(6,'0');return whole+'.'+frac;}
+export function validTronAddress(address){
+ if(typeof address!=='string'||!/^T[1-9A-HJ-NP-Za-km-z]{33}$/.test(address)||address===USDT_TRON)return false;
+ const alphabet='123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
+ let n=0n;
+ for(const c of address){const i=alphabet.indexOf(c);if(i<0)return false;n=n*58n+BigInt(i);}
+ const bytes=Buffer.alloc(25);
+ for(let i=24;i>=0;i--){bytes[i]=Number(n&255n);n>>=8n;}
+ if(n!==0n||bytes[0]!==0x41)return false;
+ const sha=x=>createHash('sha256').update(x).digest();
+ return sha(sha(bytes.subarray(0,21))).subarray(0,4).equals(bytes.subarray(21));
+}
 export function normalizeTransfer(t,address,since){
   if(!t||typeof t!=='object'||!t.token_info)return null;
   const tx=String(t.transaction_id||'');
@@ -27,7 +39,7 @@ export function createTronDeposits(db,send,options={}){
   const log=(kind,detail)=>run('INSERT INTO tron_monitor_events(at,kind,detail) VALUES(?,?,?)',now(),kind,String(detail).slice(0,180));
   function assign(user,address){
     if(!Number.isSafeInteger(user)||user<=0||!one('SELECT id FROM arena_users WHERE id=?',user))return false;
-    if(typeof address!=='string'||!/^T[1-9A-HJ-NP-Za-km-z]{33}$/.test(address))return false;
+    if(!validTronAddress(address))return false;
     // Reassignment is forbidden once funds have arrived; operators must use a separate reconciliation path.
     if(one('SELECT 1 FROM tron_deposits WHERE user_id=? LIMIT 1',user))return false;
     if(one('SELECT user_id FROM tron_deposit_addresses WHERE address=? AND user_id!=?',address,user))return false;
