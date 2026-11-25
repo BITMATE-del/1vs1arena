@@ -9,6 +9,7 @@ import { createSpecialDiceEngine, isSpecialMode, SPECIAL_MODES } from './special
 import { createMatchWatch } from './match-watch.mjs';
 import {classicRound} from './classic-rules.mjs';
 import {resultForMatch,managedRoomStatus} from './admin-results.mjs';
+import {createTronDeposits,usdtDisplay} from './tron-deposits.mjs';
 import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
@@ -35,6 +36,7 @@ const all=(sql,...args)=>db.prepare(sql).all(...args);
 const run=(sql,...args)=>db.prepare(sql).run(...args);
 const button=(text,callback_data)=>({text,callback_data});
 const specialDice=createSpecialDiceEngine(db);
+const tronDeposits=createTronDeposits(db,(user,message)=>send(user,message));
 
 db.exec("CREATE TABLE IF NOT EXISTS arena_users(id INTEGER PRIMARY KEY, name TEXT NOT NULL, username TEXT NOT NULL DEFAULT '', first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL, blocked INTEGER NOT NULL DEFAULT 0, note TEXT NOT NULL DEFAULT ''); CREATE TABLE IF NOT EXISTS arena_rooms(id INTEGER PRIMARY KEY, title TEXT NOT NULL, last_seen INTEGER NOT NULL, enabled INTEGER NOT NULL DEFAULT 1); CREATE TABLE IF NOT EXISTS admin_audit(id INTEGER PRIMARY KEY, at INTEGER NOT NULL, action TEXT NOT NULL, target TEXT NOT NULL); CREATE TABLE IF NOT EXISTS arena_settings(key TEXT PRIMARY KEY,value TEXT NOT NULL)");
 function setting(k,fallback=''){return one('SELECT value FROM arena_settings WHERE key=?',k)?.value??fallback;}
@@ -60,10 +62,27 @@ db.exec('CREATE TABLE IF NOT EXISTS welcome_banner_tokens(hash TEXT PRIMARY KEY,
 const welcomeSetupHash='f27a916bb327294d267c9cf51a30a058c19be78304a25309a0ae278c63ab20f5';
 function menu(chat){
 const photo=one("SELECT value FROM welcome_settings WHERE key='photo'")?.value||process.env.WELCOME_PHOTO_FILE_ID;
-const buttons=[[button('🎯 상대 지정 대결','mf:begin'),button('⏳ 매치 대기 등록','mf:public')],[button('🏛 공개 매치 대기실','mf:lobby'),button('🎮 내 경기','mf:mine')],[button('📊 내 전적','stats'),button('📖 이용 안내','mf:help')]];
+const buttons=[[button('🎯 상대 지정 대결','mf:begin'),button('⏳ 매치 대기 등록','mf:public')],[button('🏛 공개 매치 대기실','mf:lobby'),button('🎮 내 경기','mf:mine')],[button('💎 USDT 지갑','wallet'),button('📊 내 전적','stats')],[button('📖 이용 안내','mf:help')]];
 const caption=setting('welcome_caption','⚜️ GLORY ARENA\n━━━━━━━━━━━━━━\n승부의 끝, 영광의 시작.\n\n당신의 다음 승부를 시작하세요.\n매치를 개설하거나 대기실에서 상대를 만나보세요.\n\n1vs1 무료 대전 · 텔레그램 공식 게임');
 if(photo)enqueue('sendPhoto',{chat_id:chat,photo,caption,reply_markup:{inline_keyboard:buttons}});
 else send(chat,'GLORY ARENA\n'+caption,buttons);
+}
+function walletMenu(chat,user){
+ if(chat!==user){send(chat,'지갑 정보는 봇 개인 대화에서 확인해 주세요.');return;}
+ const addr=tronDeposits.address(user),balance=usdtDisplay(tronDeposits.balance(user));
+ const status=tronDeposits.status();
+ const lines=['💎 GLORY ARENA · USDT/TRC20 지갑','', '현재 잔액: '+balance+' USDT',''];
+ if(addr){lines.push('전용 입금 주소:',addr.address,'','USDT/TRC20만 전송해 주세요. 다른 체인·토큰은 입금 반영되지 않습니다.');}
+ else lines.push('입금 주소가 아직 발급되지 않았습니다. 운영자에게 주소 등록을 요청해 주세요.');
+ if(!status.enabled||!status.apiConfigured)lines.push('','⚠️ 자동 입금 반영 대기: 운영자가 TronGrid 연동을 활성화해야 합니다.');
+ lines.push('','입금은 체인 확정 후 자동 반영됩니다. 해당 잔액은 현재 게임 참여금으로 사용되지 않습니다.');
+ send(chat,lines.join('\n'),[[button('🔄 잔액 새로고침','wallet'),button('📋 충전 내역','wallet_history')],[button('🏠 메인 메뉴','menu')]]);
+}
+function walletHistory(chat,user){
+ if(chat!==user)return;
+ const records=tronDeposits.history(user);
+ const text=records.length?records.map(r=>'✅ '+usdtDisplay(r.amount_micro)+' USDT\n'+r.txid.slice(0,20)+'…').join('\n\n'):'확인된 USDT 입금 기록이 없습니다.';
+ send(chat,'📋 USDT/TRC20 입금 내역\n\n'+text,[[button('💎 내 지갑','wallet')]]);
 }
 function guide(chat){send(chat,'GLORY ARENA | 이용 안내\n\n1. 그룹에 봇을 추가하세요.\n2. 매치 개설에서 게임과 경기 조건을 선택하세요.\n3. 상대의 신청을 수락하세요.\n4. 안내된 순서에 따라 공식 이모지 게임을 진행하세요.\n\n모든 대전은 무료입니다.',[[button('메인 메뉴','menu')]]);}
 function stats(chat,user){
@@ -122,6 +141,8 @@ if(p[0]==='mf'&&matchFlow.onCallback(user,cid,p))return;
 if(p[0]==='dice'&&/^\d+$/.test(p[1]||'')){playerDiceHelp(cid,user,Number(p[1]));return;}
 if(p[0]==='menu'){menu(cid);return;}
 if(p[0]==='stats'){stats(cid,user);return;}
+if(p[0]==='wallet'){walletMenu(cid,user);return;}
+if(p[0]==='wallet_history'){walletHistory(cid,user);return;}
 if(p[0]==='guide'){guide(cid);return;}
 if(chat.type==='private'){if(p[0]==='choose'){matchFlow.begin(user);return;}if(p[0]==='lobby'){matchFlow.lobby(user);return;}groupLink(cid);return;}
 if(p[0]==='lobby'){lobby(cid);return;}
@@ -135,6 +156,8 @@ if(setWelcome(m))return;
 const cid=m.chat.id,t=(m.text||'').split(/\s+/)[0].split('@')[0],full=m.text||'';
 if(['/start','/help'].includes(t)||full==='🏠 메인 메뉴'){if(m.chat.type!=='private'&&roomService.isGeneratedChat(cid)){send(cid,'⚜️ 이 그룹은 GLORY ARENA 전용 대전방입니다. 경기 진행 안내는 위 공지에서 확인해 주세요.');return;}menu(cid);return;}
 if(full==='📖 이용 안내'){matchFlow.tutorial(cid);return;}
+if(m.chat.type==='private'&&['/wallet','/deposit','/balance'].includes(t)){walletMenu(cid,m.from.id);return;}
+if(m.chat.type==='private'&&t==='/deposits'){walletHistory(cid,m.from.id);return;}
 if(m.chat.type==='private'&&matchFlow.onText(m.from.id,full))return;
 if(m.chat.type!=='private'&&['/resume','/status'].includes(t)){const current=one("SELECT id FROM matches WHERE chat=? AND state='active' ORDER BY id DESC LIMIT 1",cid);if(current)matchBoard.queueMatch(current.id);else send(cid,'현재 진행 중인 경기가 없습니다.');void drain();return;}
 if(m.chat.type!=='private'&&['/end','/stop','/close'].includes(t)){matchFlow.stopByChat(m.from.id,cid);return;}
@@ -334,3 +357,5 @@ webhookReady=true;console.log('Webhook update accepted',u.update_id);res.writeHe
 });
 server.listen(port,'0.0.0.0',()=>{console.log('GLORY ARENA HTTP server listening on',port);void register();});
 setInterval(()=>{void drain();void roomService.work();roomService.recover();matchFlow.tick();matchWatch.sync();matchWatch.tick();},5000).unref();
+setInterval(()=>{void tronDeposits.poll().then(r=>{if(r.credited)void drain();}).catch(e=>console.warn('TRON watcher:',String(e.message||e).slice(0,90)));},60000).unref();
+setTimeout(()=>{void tronDeposits.poll().then(r=>{if(r.credited)void drain();}).catch(e=>console.warn('TRON watcher startup:',String(e.message||e).slice(0,90)));},15000).unref();
