@@ -14,6 +14,7 @@ import {createSharedWallet} from './shared-wallet.mjs';
 import {createBotAdmin} from './bot-admin.mjs';
 import {projectPrize,PLATFORM_FEE_BPS,FEE_POLICY_VERSION} from './fee-policy.mjs';
 import {createSettlementJournal} from './settlement-journal.mjs';
+import {summarizeReadiness,OFFICIAL_GAMES} from './readiness.mjs';
 import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
@@ -256,7 +257,7 @@ if(path==='/admin/login'&&req.method==='POST'){const ip=String(req.headers['x-re
 if(path==='/admin/logout'&&req.method==='POST'){res.writeHead(303,{'location':'/admin','set-cookie':'ga_admin=; Path=/admin; HttpOnly; Secure; SameSite=Strict; Max-Age=0'}).end();return true;}
 
 if(!adminAuth(req)){if(req.method!=='GET'){res.writeHead(403).end();return true;}adminPage(res,'<section class="login"><h1>GLORY ARENA</h1><p>관리자 전용 로그인</p><form method="post" action="/admin/login"><label>관리자 비밀번호<input type="password" name="password" required autocomplete="current-password"></label><button>로그인</button></form></section>');return true;}
-const sections={overview:'대시보드',users:'회원 관리',rooms:'방 관리',matches:'경기 관리',records:'판정 기록',games:'게임 설정',telegram:'텔레그램 계정 관리',requests:'대전 신청 관리',operations:'운영 안정성',settlement:'정산 감사 기록',deposits:'USDT 자동 입금',bot_admin:'봇 관리자',bot:'봇 설정',audit:'운영 로그'};
+const sections={overview:'대시보드',users:'회원 관리',rooms:'방 관리',matches:'경기 관리',records:'판정 기록',games:'게임 설정',telegram:'텔레그램 계정 관리',requests:'대전 신청 관리',operations:'운영 안정성',readiness:'기능 최종 점검',settlement:'정산 감사 기록',deposits:'USDT 자동 입금',bot_admin:'봇 관리자',bot:'봇 설정',audit:'운영 로그'};
 const url=new URL(req.url,base);
 const tab=Object.hasOwn(sections,url.searchParams.get('tab'))?url.searchParams.get('tab'):'overview';
 const csrf=createHash('sha256').update(secret+':csrf:'+String(req.headers.cookie||'')).digest('hex');
@@ -281,6 +282,17 @@ if(act==='bot_admin_test'){
  const result=botAdmin.isAdmin(user);
  if(result)send(user,'🔔 GLORY ARENA 봇 관리자 알림 테스트\n이 메시지가 보이면 관리자로 등록된 개인 채팅에 정상 발송 중입니다.');
  res.writeHead(303,{location:'/admin?tab=bot_admin&saved='+Number(result)}).end();void drain();return true;
+}
+if(act==='enable_free_games'){
+ const count=OFFICIAL_GAMES.reduce((n,g)=>n+Number(gameEnabled(g)),0);
+ db.exec('SAVEPOINT enable_free_games');
+ try{
+  run("INSERT INTO arena_settings(key,value) VALUES('matches_enabled','1') ON CONFLICT(key) DO UPDATE SET value='1'");
+  for(const g of OFFICIAL_GAMES)run("INSERT INTO arena_settings(key,value) VALUES(?, '1') ON CONFLICT(key) DO UPDATE SET value='1'",'game:'+g);
+  run('INSERT INTO admin_audit(at,action,target) VALUES(?,?,?)',Date.now(),'enable_free_games','6 games + matches; previous enabled='+count);
+  db.exec('RELEASE enable_free_games');
+ }catch(e){db.exec('ROLLBACK TO enable_free_games');db.exec('RELEASE enable_free_games');throw e;}
+ res.writeHead(303,{location:'/admin?tab=readiness&saved=1'}).end();return true;
 }
 if(act==='treasury_set'){
  const addr=(q.get('treasury_address')||'').trim();
@@ -395,6 +407,23 @@ return tr([m.id,m.chat,owner,guest,(games[m.game]?.[0]||m.game)+' · '+(modes[m.
 }))+paging()+'</section>';}
 if(tab==='records'){const rows=all("SELECT * FROM rolls WHERE CAST(match AS TEXT) LIKE ? OR CAST(player AS TEXT) LIKE ? OR CAST(chat AS TEXT) LIKE ? ORDER BY rowid DESC LIMIT 50 OFFSET ?",like,like,like,offset);
 content='<section><h2>텔레그램 원본 판정</h2><p>수신한 공식 이모지 결과와 메시지 번호를 조회합니다. 수정 및 삭제 기능은 제공하지 않습니다.</p>'+finder()+table(['경기','그룹','메시지 ID','라운드','참가자','공식 값'],rows.map(r=>tr([r.match,r.chat,r.message,r.round,r.player,r.value])))+paging()+'</section>';}
+if(tab==='readiness'){
+ const serviceStatus=summarizeReadiness({
+  serverOnline:true,webhookReady,
+  enabledGames:OFFICIAL_GAMES.filter(gameEnabled).length,
+  matchesEnabled:setting('matches_enabled','1')==='1',
+  roomAccountConnected:telegramAuth.info().connected,
+  adminRecipients:one('SELECT COUNT(*) n FROM bot_admins WHERE enabled=1').n,
+  tronKey:Boolean(process.env.TRONGRID_API_KEY),
+  treasuryAddress:sharedWallet.treasury(),
+  sharedDepositsEnabled:sharedWallet.status().enabled
+ });
+ content='<section><h2>운영 기능 최종 점검</h2><p>서버의 현재 설정과 DB 상태를 확인한 결과입니다. 단위 테스트 통과와 실제 고객 입출금 거래 성공은 서로 다른 확인 항목입니다.</p>'+
+ table(['기능','상태','상세'],serviceStatus.checks.map(x=>tr([x.label,x.ok?'설정 확인':'조치 필요',x.detail])))+'</section>'+
+ '<section><h2>무료 게임 기능 활성화</h2><p>6종 게임 및 신규 무료 매치 접수만 한 번에 활성화합니다. 기존 경기는 유지하며, USDT 입금·출금·유료 정산 설정은 변경하지 않습니다.</p>'+
+ form('enable_free_games','','무료 대전 6종 전체 활성화')+'</section>'+
+ '<section><h2>필수 운영 확인</h2><p>자동 입금은 공용 지갑 주소 등록과 활성화 변수 설정, 실거래 소액 검증이 필요합니다. 자동 출금은 서명 서비스와 온체인 거래 검증이 구현되지 않았습니다. 승리금·환급금의 실제 이동은 금전 정산 엔진이 없으므로 활성화할 수 없습니다.</p></section>';
+}
 if(tab==='settlement'){
 const stat=settlementJournal.summary(),entries=settlementJournal.entries();
 content='<section><h2>경기별 판정 및 환급 정책</h2><p>승패 확정: 총 참가금의 3%를 수수료로 산정하며 나머지 97%를 승리자에게 배정하는 계산 정책입니다. 동액 참가인 경우 1.94배 지급 예정입니다.</p><p>무승부: 양쪽 참가금 전액 반환 · 수수료 0%. 경기 시작 전 취소·상호 동의 중단·시간초과 중단·관리자 강제 종료: 양측 참가금 전액 반환 · 수수료 0%. 완료된 승패 기록은 이후 방 종료와 관계없이 유지됩니다.</p><p><strong>현재는 계산 규칙과 감사 기록만 구현되며, 회원 잔액 차감·환급·승리금 지급은 실행되지 않습니다.</strong> 역사적 무료 게임은 수수료 정책 적용에서 제외됩니다.</p></section>'+
@@ -403,10 +432,10 @@ content='<section><h2>경기별 판정 및 환급 정책</h2><p>승패 확정: �
 }
 if(tab==='games'){
  const sample=projectPrize(100000000n);
- content='<section><h2>경기 정산 수수료 정책</h2><p>정책 버전: '+esc(FEE_POLICY_VERSION)+'</p><p><strong>총 판돈의 '+(PLATFORM_FEE_BPS/100)+'% 수수료</strong> · 양쪽이 같은 금액을 참가하는 경우 승리자 지급 비율 1.94배입니다.</p><p>예시: 양측 100 USDT씩, 합계 200 USDT → 수수료 '+usdtDisplay(sample.fee)+' USDT → 승리자 지급 예정 '+usdtDisplay(sample.winnerPayout)+' USDT.</p><p>현재 정책은 시뮬레이션·운영 설계 정보이며 실제 경기 입장금 차감, 승리금 적립, USDT 송금은 <strong>연결하지 않았습니다</strong>. 기존 무료 경기와 회원 지갑 잔액에 영향을 주지 않습니다. 무승부/취소 시 환급 규칙은 별도 정의가 필요합니다.</p></section>';
+ content='<section><h2>경기 정산 수수료 정책</h2><p>정책 버전: '+esc(FEE_POLICY_VERSION)+'</p><p><strong>총 판돈의 '+(PLATFORM_FEE_BPS/100)+'% 수수료</strong> · 양쪽이 같은 금액을 참가하는 경우 승리자 지급 비율 1.94배입니다.</p><p>예시: 양측 100 USDT씩, 합계 200 USDT → 수수료 '+usdtDisplay(sample.fee)+' USDT → 승리자 지급 예정 '+usdtDisplay(sample.winnerPayout)+' USDT.</p><p>현재 정책은 시뮬레이션·운영 설계 정보이며 실제 경기 입장금 차감, 승리금 적립, USDT 송금은 <strong>연결하지 않았습니다</strong>. 기존 무료 경기와 회원 지갑 잔액에 영향을 주지 않습니다. 무승부·중도 종료는 수수료 0%와 양측 전액 반환 정책으로 정의되었으나 실제 잔액 이동은 미구현입니다.</p></section>';
 }
 if(tab==='games'){content+='<section><h2>신규 매치 접수</h2><p>기존 경기를 유지하면서 신규 경기 개설을 제어합니다.</p>'+form('matches_enabled','',valueField(setting('matches_enabled','1')==='1'?'0':'1'),setting('matches_enabled','1')==='1'?'신규 접수 중단':'신규 접수 허용')+'</section><section><h2>게임별 설정</h2>'+table(['게임','공식 값 범위','신규 개설','관리'],Object.entries(games).map(([g,v])=>tr([g+' '+v[0],'1~'+v[1],gameEnabled(g)?'사용':'중단'],'<td>'+form('game',g,valueField(gameEnabled(g)?'0':'1'),gameEnabled(g)?'비활성화':'활성화')+'</td>')))+'<p>무료 대전만 지원합니다. 슬롯은 원시 값 비교이며 조합 판정은 미구현입니다.</p></section>';}
-if(tab==='bot'){content='<section><h2>연결 정보</h2><p>공식 봇: @'+esc(username)+'<br>웹훅: '+(webhookReady?'정상':'미연결')+'<br>API ID / HASH: '+(process.env.TELEGRAM_API_ID&&process.env.TELEGRAM_API_HASH?'등록 완료':'미등록')+'<br>시작 이미지: '+(one("SELECT value FROM welcome_settings WHERE key='photo'")?.value?'새 봇용 이미지 등록됨':process.env.WELCOME_PHOTO_FILE_ID?'기존 이미지 ID 등록됨 · 새 봇에서 재등록 필요':'미등록')+'<br>마지막 오류: '+esc(lastError||'없음')+'</p><p>계정 로그인 및 자동 그룹 생성은 미연동입니다. 비밀값은 표시하지 않습니다.</p></section><section><h2>시작 화면 문구</h2>'+form('welcome_caption','', '<textarea name="value" maxlength="900" rows="7" required>'+esc(setting('welcome_caption','⚜️ GLORY ARENA\n승부의 끝, 영광의 시작.\n\n당신의 다음 승부를 시작하세요.\n매치를 개설하거나 대기실에서 상대를 만나보세요.\n\n1vs1 무료 대전 · 텔레그램 공식 게임'))+'</textarea>','문구 저장')+'</section><section><h2>시작 이미지 변경</h2><p>텔레그램 봇을 변경했다면 기존 사진 ID가 무효가 됩니다. 새 봇에서 등록해야 합니다.</p>'+form('banner_generate','','사진 등록 코드 발급')+'</section>';}
+if(tab==='bot'){content='<section><h2>연결 정보</h2><p>공식 봇: @'+esc(username)+'<br>웹훅: '+(webhookReady?'정상':'미연결')+'<br>API ID / HASH: '+(process.env.TELEGRAM_API_ID&&process.env.TELEGRAM_API_HASH?'등록 완료':'미등록')+'<br>시작 이미지: '+(one("SELECT value FROM welcome_settings WHERE key='photo'")?.value?'새 봇용 이미지 등록됨':process.env.WELCOME_PHOTO_FILE_ID?'기존 이미지 ID 등록됨 · 새 봇에서 재등록 필요':'미등록')+'<br>마지막 오류: '+esc(lastError||'없음')+'</p><p>그룹 생성 계정의 연결 상태와 전용 방 생성 결과는 텔레그램 계정 관리 메뉴에서 확인하세요. 비밀값은 표시하지 않습니다.</p></section><section><h2>시작 화면 문구</h2>'+form('welcome_caption','', '<textarea name="value" maxlength="900" rows="7" required>'+esc(setting('welcome_caption','⚜️ GLORY ARENA\n승부의 끝, 영광의 시작.\n\n당신의 다음 승부를 시작하세요.\n매치를 개설하거나 대기실에서 상대를 만나보세요.\n\n1vs1 무료 대전 · 텔레그램 공식 게임'))+'</textarea>','문구 저장')+'</section><section><h2>시작 이미지 변경</h2><p>텔레그램 봇을 변경했다면 기존 사진 ID가 무효가 됩니다. 새 봇에서 등록해야 합니다.</p>'+form('banner_generate','','사진 등록 코드 발급')+'</section>';}
 
 if(tab==='telegram'){
 const a=telegramAuth.info();
