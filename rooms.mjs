@@ -50,7 +50,10 @@ export function createRoomService(db,telegramAuth,botUsername,send){
         if(!Number.isSafeInteger(chat))throw Error('GROUP_ID_INVALID');
         run("UPDATE generated_rooms SET chat=?,title=?,access_hash=? WHERE code=?",chat,'GLORY ARENA '+job.code,String(channel.accessHash||''),job.code);
         const peer=await c.getInputEntity(channel);
-        const bot=await c.getInputEntity('@'+botUsername);
+        // Resolve the bot name at room creation time, after getMe initializes it.
+        const activeBotUsername=String(typeof botUsername==='function'?botUsername():botUsername||'').trim().replace(/^@/,'');
+        if(!/^[A-Za-z0-9_]{5,32}$/.test(activeBotUsername))throw Error('BOT_USERNAME_UNAVAILABLE');
+        const bot=await c.getInputEntity('@'+activeBotUsername);
         try{await c.invoke(new Api.channels.InviteToChannel({channel:peer,users:[bot]}));}
         catch(e){if(!/USER_ALREADY_PARTICIPANT|USER_ALREADY_IN_CHAT|USER_ALREADY_IN_CHANNEL/.test(String(e?.errorMessage||e?.message||'')))throw e;}
         await c.invoke(new Api.channels.EditAdmin({channel:peer,userId:bot,adminRights:new Api.ChatAdminRights({deleteMessages:true,banUsers:true,inviteUsers:true,pinMessages:true,other:true}),rank:'Arena'}));
