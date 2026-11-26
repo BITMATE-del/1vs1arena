@@ -6,13 +6,29 @@ export function createTelegramAuth(db, secret, adminPassword) {
   const apiId=Number(process.env.TELEGRAM_API_ID), apiHash=process.env.TELEGRAM_API_HASH||'';
   const creds={apiId, apiHash};
   const configured=Number.isSafeInteger(apiId)&&apiId>0&&/^[a-fA-F0-9]{32}$/.test(apiHash.trim());
-  const key=createHash('sha256').update(secret+':telegram-session:'+adminPassword).digest();
+  // Optional stable encryption secret decouples Telegram login sessions from admin password changes.
+  // The legacy key remains read-only fallback to migrate existing sessions without loss.
+  const legacyKey=createHash('sha256').update(secret+':telegram-session:'+adminPassword).digest();
+  const stableSecret=String(process.env.TELEGRAM_SESSION_KEY||'');
+  const key=stableSecret.length>=32?createHash('sha256').update(stableSecret+':glory-arena:telegram-session:v1').digest():legacyKey;
   db.exec("CREATE TABLE IF NOT EXISTS telegram_account_session(id INTEGER PRIMARY KEY CHECK(id=1), encrypted TEXT NOT NULL, user_id TEXT NOT NULL, name TEXT NOT NULL, username TEXT NOT NULL, saved_at INTEGER NOT NULL)");
   let pending=null;
   let lastError='';
   let lastSent=0;
   function seal(raw){const iv=randomBytes(12), cipher=createCipheriv('aes-256-gcm',key,iv);const data=Buffer.concat([cipher.update(raw,'utf8'),cipher.final()]);return Buffer.concat([iv,cipher.getAuthTag(),data]).toString('base64');}
-  function unseal(raw){const bytes=Buffer.from(raw,'base64');if(bytes.length<30)throw Error('Session invalid');const decipher=createDecipheriv('aes-256-gcm',key,bytes.subarray(0,12));decipher.setAuthTag(bytes.subarray(12,28));return Buffer.concat([decipher.update(bytes.subarray(28)),decipher.final()]).toString();}
+  function unseal(raw){
+    const bytes=Buffer.from(raw,'base64');
+    if(bytes.length<30)throw Error('Session invalid');
+    let last;
+    for(const candidate of (key.equals(legacyKey)?[key]:[key,legacyKey])){
+      try{
+        const decipher=createDecipheriv('aes-256-gcm',candidate,bytes.subarray(0,12));
+        decipher.setAuthTag(bytes.subarray(12,28));
+        return Buffer.concat([decipher.update(bytes.subarray(28)),decipher.final()]).toString();
+      }catch(e){last=e;}
+    }
+    throw Error('SESSION_DECRYPT_FAILED');
+  }
   function current(){return db.prepare('SELECT * FROM telegram_account_session WHERE id=1').get();}
   function info(){const row=current();let usable=false; if(row&&configured){try{usable=!!unseal(row.encrypted);}catch{lastError='SESSION_DECRYPT_FAILED';}}return {configured,connected:usable,id:row?.user_id||'',name:row?.name||'',username:row?.username||'',savedAt:row?.saved_at||null,stage:pending?.stage||'',lastError};}
   async function closePending(){if(pending?.client)await pending.client.disconnect().catch(()=>{});pending=null;}
