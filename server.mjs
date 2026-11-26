@@ -338,6 +338,15 @@ if(['wallet_manual_credit','wallet_manual_debit','wallet_manual_deposit'].includ
  }
  res.writeHead(303,{location:'/admin?tab=deposits&saved='+Number(result.ok)+'&reason='+encodeURIComponent(result.reason||'')}).end();void drain();return true;
 }
+if(['invoice_manual_credit','invoice_manual_reject'].includes(act)){
+ const invoiceId=Number(q.get('invoice_id'));
+ const result=walletOps.invoiceAction(invoiceId,act==='invoice_manual_credit'?'credit':'reject','web_admin',(q.get('reference')||'').trim());
+ if(result.ok){
+  run('INSERT INTO admin_audit(at,action,target) VALUES(?,?,?)',Date.now(),act,String(invoiceId));
+  send(result.user,act==='invoice_manual_credit'?'✅ 입금 신청 #'+invoiceId+' 수동 반영 완료 · '+usdtDisplay(result.amount)+' USDT':'❌ 입금 신청 #'+invoiceId+' 수동 거절 처리');
+ }
+ res.writeHead(303,{location:'/admin?tab=deposits&saved='+Number(result.ok)+'&reason='+encodeURIComponent(result.reason||'')}).end();void drain();return true;
+}
 if(['withdraw_approve','withdraw_reject','withdraw_paid'].includes(act)){
  const wid=Number(q.get('withdrawal_id')),action=act==='withdraw_approve'?'approve':act==='withdraw_reject'?'reject':'paid';
  const result=walletOps.withdrawal(wid,action,'web_admin',(q.get('txid')||'').trim());
@@ -537,7 +546,7 @@ content='<div class="grid">'+[['감시 상태',fixed.enabled&&fixed.apiConfigure
 form('tron_rescan','','지금 입금 재확인')+'</section>'+
 '<section><h2>회원별 입금주소 배정</h2><p>실제 본사가 통제하는 회원 전용 TRON 주소만 등록하세요. 개인키는 입력하지 않습니다. 동일 주소 중복 배정 및 주소 체크섬 오류를 차단합니다.</p>'+
 form('tron_assign','', '<input name="user_id" type="number" min="1" placeholder="회원 텔레그램 숫자 ID" required><input name="deposit_address" maxlength="34" placeholder="T로 시작하는 TRON 입금주소" required>','기존 회원별 주소 배정')+'</section>'+
-'<section><h2>공용 지갑 충전 신청</h2>'+table(['번호','회원','정확한 금액','상태','생성일','TXID'],invoices.map(r=>tr([r.id,r.username?'@'+r.username:r.user_id,usdtDisplay(r.amount_micro),r.status,date(r.created),r.txid||'-'])))+'</section>'+
+'<section><h2>공용 지갑 충전 신청 · 수동 처리</h2><p>자동 확인되지 않은 신청만 관리자가 반영하거나 거절할 수 있습니다. 수동 충전 시 실제 확인한 고유 입금 관리번호 또는 TXID를 입력하세요.</p>'+table(['번호','회원','정확한 금액','상태','생성일','관리'],invoices.map(r=>tr([r.id,r.username?'@'+r.username:r.user_id,usdtDisplay(r.amount_micro),r.status,date(r.created)],'<td>'+(['pending','expired'].includes(r.status)?form('invoice_manual_credit','', '<input type="hidden" name="invoice_id" value="'+r.id+'"><input name="reference" minlength="3" maxlength="160" placeholder="고유 입금 관리번호 또는 TXID" required>','수동 충전 반영')+form('invoice_manual_reject','', '<input type="hidden" name="invoice_id" value="'+r.id+'">','신청 거절'):'—')+'</td>')))+'</section>'+
 '<section><h2>미매칭 거래 · 관리자 확인</h2><p>미매칭 입금은 자동으로 다른 회원에게 배정하지 않습니다.</p>'+table(['TXID','수량','사유','감지 시각'],unmatched.map(r=>tr([r.txid,usdtDisplay(r.amount_micro),r.reason,date(r.detected)])))+'</section>'+
 '<section><h2>회원 잔액 조절</h2><p>회원 ID와 증감 금액을 입력하세요. 기존 금전 기록은 삭제되지 않으며 조정 전후 잔액이 별도 기록됩니다. 차감 시 잔액 부족을 차단합니다.</p>'+
 form('wallet_manual_credit','', '<input name="request_key" type="hidden" value="'+randomBytes(16).toString('hex')+'"><input name="user_id" type="number" min="1" placeholder="회원 텔레그램 숫자 ID" required><input name="amount" placeholder="충전 금액 USDT" required><input name="reference" minlength="3" maxlength="160" placeholder="조정 사유 또는 관리번호" required>','잔액 추가')+
@@ -573,7 +582,7 @@ table(['코드','상태','오류','관리'],failures.map(r=>tr([r.code,r.match_s
 }
 if(tab==='audit'){const rows=all('SELECT * FROM admin_audit ORDER BY id DESC LIMIT 50 OFFSET ?',offset);const names={block:'회원 제한',unblock:'회원 제한 해제',note:'회원 메모',room_enable:'방 활성화',room_disable:'방 중단',cancel:'대기 경기 취소',game:'게임 설정',matches_enabled:'신규 매치 설정',welcome_caption:'시작 문구 수정'};content='<section><h2>관리자 변경 기록</h2>'+table(['시간','작업','대상'],rows.map(r=>tr([date(r.at),names[r.action]||r.action,r.target])))+paging()+'</section>';}
 const nav=Object.entries(sections).map(([k,v])=>'<a class="'+(k===tab?'selected':'')+'" href="/admin?tab='+k+'">'+v+'</a>').join('');
-adminPage(res,'<header><div><h1>GLORY ARENA</h1><small>운영 관리 센터</small></div><form method="post" action="/admin/logout"><button>로그아웃</button></form></header><div class="layout"><nav>'+nav+'</nav><article><h2 class="page-title">'+sections[tab]+'</h2>'+(url.searchParams.has('saved')?'<section>'+ (url.searchParams.get('saved')==='1'?'저장되었습니다.':'변경되지 않았습니다. 상태 또는 입력값을 확인하세요.')+'</section>':'')+content+'</article></div>');return true;
+adminPage(res,'<header><div><h1>GLORY ARENA</h1><small>운영 관리 센터</small></div><form method="post" action="/admin/logout"><button>로그아웃</button></form></header><div class="layout"><nav>'+nav+'</nav><article><h2 class="page-title">'+sections[tab]+'</h2>'+(url.searchParams.has('saved')?'<section>'+ (url.searchParams.get('saved')==='1'?'저장되었습니다.':'변경되지 않았습니다. 상태 또는 입력값을 확인하세요. '+esc(url.searchParams.get('reason')||''))+'</section>':'')+content+'</article></div>');return true;
 }
 
 const server=http.createServer(async(req,res)=>{
