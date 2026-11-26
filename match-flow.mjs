@@ -17,7 +17,7 @@ export function createMatchFlow(db, send, roomService, games, modes, rounds, opt
   // Integer micro-USDT arithmetic: avoid float rounding and precision loss.
   const parseStake=text=>{
     const value=String(text).trim();
-    if(!/^(?:0|[1-9]\\d{0,6})(?:\\.\\d{1,6})?$/.test(value))return null;
+    if(!/^(?:0|[1-9]\d{0,6})(?:\.\d{1,6})?$/.test(value))return null;
     const [whole,decimal='']=value.split('.');
     const micro=BigInt(whole)*1000000n+BigInt((decimal+'000000').slice(0,6));
     return micro<=1000000000000n?Number(micro):null;
@@ -32,7 +32,7 @@ export function createMatchFlow(db, send, roomService, games, modes, rounds, opt
   function offerStake(user,code){
     const r=get(code);if(!r||r.owner!==user||r.status!=='selecting')return;
     run("INSERT INTO match_inputs(user_id,kind,created) VALUES(?,?,?) ON CONFLICT(user_id) DO UPDATE SET kind=excluded.kind,created=excluded.created",user,'stake:'+code,Date.now());
-    send(user,'💎 대전 금액을 직접 입력해 주세요.\\n\\n예: 0 / 2.5 / 10 / 125.75\\n\\n0 USDT = 무료 대전\\n0보다 큰 금액 = 양측 각각 낼 참가금\\n\\n승리 시 총 판돈의 3% 수수료를 공제하며, 무승부·중도 종료 시 전액 환급합니다.\\n\\n최대 1,000,000 USDT, 소수점 6자리까지 입력할 수 있습니다.',[[btn('❌ 대전 개설 취소','mf:cancel:'+code)]]);
+    send(user,'💎 대전 금액을 직접 입력해 주세요.\n\n예: 0 / 2.5 / 10 / 125.75\n\n0 USDT = 무료 대전\n0보다 큰 금액 = 양측 각각 낼 참가금\n\n승리 시 총 판돈의 3% 수수료를 공제하며, 무승부·중도 종료 시 전액 환급합니다.\n\n최대 1,000,000 USDT, 소수점 6자리까지 입력할 수 있습니다.',[[btn('❌ 대전 개설 취소','mf:cancel:'+code)]]);
   }
   db.exec("CREATE TABLE IF NOT EXISTS match_continue_votes(code TEXT PRIMARY KEY, owner_vote TEXT, guest_vote TEXT, deadline INTEGER NOT NULL, close_after INTEGER, state TEXT NOT NULL DEFAULT 'voting', last_error TEXT, updated INTEGER NOT NULL)");
   const votesFor=code=>one("SELECT * FROM match_continue_votes WHERE code=?",code);
@@ -53,12 +53,12 @@ export function createMatchFlow(db, send, roomService, games, modes, rounds, opt
       const code=input.kind.slice(6),r=get(code);
       if(!r||r.owner!==user||r.status!=='selecting'){run('DELETE FROM match_inputs WHERE user_id=?',user);send(user,'금액 입력이 만료됐습니다. 대전을 다시 개설해 주세요.');return true;}
       const amount=parseStake(body);
-      if(amount===null){send(user,'⚠️ 올바른 대전 금액을 입력해 주세요.\\n0은 무료 대전입니다.\\n0보다 크면 USDT 금액을 입력하세요. (최대 1,000,000 / 소수점 6자리)');return true;}
+      if(amount===null){send(user,'⚠️ 올바른 대전 금액을 입력해 주세요.\n0은 무료 대전입니다.\n0보다 크면 USDT 금액을 입력하세요. (최대 1,000,000 / 소수점 6자리)');return true;}
       if(amount>0&&!moneyAllowed()){send(user,'현재 유료 대전 접수가 중단되어 있습니다. 0을 입력하면 무료 대전으로 진행됩니다.');return true;}
       run('DELETE FROM match_inputs WHERE user_id=?',user);
       run('UPDATE match_requests SET stake_micro=?,updated=? WHERE code=? AND owner=? AND status=?',amount,Date.now(),code,user,'selecting');
       const latest=get(code);
-      send(user,'✅ 대전 신청 최종 확인\\n\\n'+code+'\\n'+latest.game+' · '+modes[latest.mode]+' · '+latest.rounds+'판\\n'+stakeLabel(latest)+'\\n'+(latest.guest?'상대: '+name(latest.guest):'공개 대기실에 등록')+'\\n\\n이 금액으로 대전을 개설하시겠습니까?',[[btn(latest.guest?'📩 대전 신청':'🏛 대기실 등록','mf:submit:'+code),btn('❌ 취소','mf:cancel:'+code)]]);
+      send(user,'✅ 대전 신청 최종 확인\n\n'+code+'\n'+latest.game+' · '+modes[latest.mode]+' · '+latest.rounds+'판\n'+stakeLabel(latest)+'\n'+(latest.guest?'상대: '+name(latest.guest):'공개 대기실에 등록')+'\n\n이 금액으로 대전을 개설하시겠습니까?',[[btn(latest.guest?'📩 대전 신청':'🏛 대기실 등록','mf:submit:'+code),btn('❌ 취소','mf:cancel:'+code)]]);
       return true;
     }
     if(input.kind!=='opponent')return false;
@@ -303,7 +303,7 @@ export function createMatchFlow(db, send, roomService, games, modes, rounds, opt
     }catch(e){
       run("UPDATE match_continue_votes SET state='close_failed',last_error='GROUP_CLOSE_FAILED',updated=? WHERE code=?",Date.now(),code);
       options.onCloseFailed?.(get(code)?.match_id,code);
-      console.warn('Match cleanup failed',{code,reason:String(e?.errorMessage||e?.message||'error').replace(/\\+?\\d{8,}/g,'[redacted]').slice(0,80)});
+      console.warn('Match cleanup failed',{code,reason:String(e?.errorMessage||e?.message||'error').replace(/\\+?\d{8,}/g,'[redacted]').slice(0,80)});
     }finally{closingInProgress.delete(code);}
   }
 
