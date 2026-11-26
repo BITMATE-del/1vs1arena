@@ -38,7 +38,7 @@ assert.equal((await w.poll()).credited,0,'repeat scan cannot credit twice');
 assert.equal(credits.length,2);
 const wd=w.requestWithdrawal(11,address(4),'4');
 assert(wd.ok,'balance held for withdrawal');
-const after=BigInt(w.invoice(11,'10').invoice.amount_micro);
+const after=BigInt(invoice1.invoice.amount_micro);
 assert(w.cancelWithdrawal(wd.id));
 assert.equal(w.cancelWithdrawal(wd.id),false,'cancel idempotent');
 assert.equal(String(db.prepare('SELECT balance_micro FROM tron_wallets WHERE user_id=11').get().balance_micro),String(after));
