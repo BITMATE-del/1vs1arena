@@ -336,7 +336,9 @@ if(['wallet_manual_credit','wallet_manual_debit','wallet_manual_deposit'].includ
   run('INSERT INTO admin_audit(at,action,target) VALUES(?,?,?)',Date.now(),act,String(user)+':'+amount+':'+reference.slice(0,70));
   send(user,kind==='debit'?'📉 관리자 잔액 조정: -'+amount+' USDT':'✅ '+(kind==='manual_deposit'?'수동 입금 반영':'관리자 잔액 조정')+': +'+amount+' USDT');
  }
- res.writeHead(303,{location:'/admin?tab=deposits&saved='+Number(result.ok)+'&reason='+encodeURIComponent(result.reason||'')}).end();void drain();return true;
+ const back=q.get('return_tab')==='users'?'users':'deposits';
+ const search=q.get('return_search')||'';
+ res.writeHead(303,{location:'/admin?tab='+back+'&q='+encodeURIComponent(search.slice(0,100))+'&saved='+Number(result.ok)+'&reason='+encodeURIComponent(result.reason||'')}).end();void drain();return true;
 }
 if(['invoice_manual_credit','invoice_manual_reject'].includes(act)){
  const invoiceId=Number(q.get('invoice_id'));
@@ -448,11 +450,26 @@ const valueField=v=>'<input type="hidden" name="value" value="'+esc(v)+'">';
 let content='';
 if(tab==='overview'){
 const c=one("SELECT COUNT(*) AS total,COALESCE(SUM(state='waiting'),0) AS waiting,COALESCE(SUM(state='requested'),0) AS requested,COALESCE(SUM(state='active'),0) AS active,COALESCE(SUM(state='finished'),0) AS finished FROM matches");
-const metrics=[['등록 회원',one('SELECT COUNT(*) n FROM arena_users').n],['등록 방',one('SELECT COUNT(*) n FROM arena_rooms').n],['전체 경기',c.total],['대기 경기',c.waiting],['신청 접수',c.requested],['진행 경기',c.active],['종료 경기',c.finished],['발송 대기',one('SELECT COUNT(*) n FROM outbox').n]];
-content='<div class="grid">'+metrics.map(([k,v])=>'<section><small>'+k+'</small><div class="metric">'+v+'</div></section>').join('')+'</div><section><h2>시스템 상태</h2><p>웹훅: '+(webhookReady?'연결 정상':'확인 중')+' · 신규 매치: '+(setting('matches_enabled','1')==='1'?'허용':'중단')+'</p><p>현재 무료 대전 운영 · 자동 전용 그룹 생성 미연동</p></section>';
+const feeStats=one("SELECT COALESCE(SUM(CASE WHEN decision='winner' THEN fee_micro ELSE 0 END),0) AS total, COALESCE(SUM(CASE WHEN decision='winner' AND created >= ? THEN fee_micro ELSE 0 END),0) AS today,COALESCE(SUM(CASE WHEN decision='winner' AND created >= ? THEN fee_micro ELSE 0 END),0) AS last7,COALESCE(SUM(CASE WHEN decision='winner' AND fee_micro>0 THEN 1 ELSE 0 END),0) AS fee_games FROM money_settlements",new Date(new Date().toLocaleDateString('en-CA',{timeZone:'Asia/Seoul'})+'T00:00:00+09:00').getTime(),Date.now()-7*86400000);
+const metrics=[['누적 경기 수수료',usdtDisplay(feeStats.total)+' USDT'],['오늘 경기 수수료',usdtDisplay(feeStats.today)+' USDT'],['최근 7일 수수료',usdtDisplay(feeStats.last7)+' USDT'],['수수료 발생 경기',feeStats.fee_games+'건'],['등록 회원',one('SELECT COUNT(*) n FROM arena_users').n],['등록 방',one('SELECT COUNT(*) n FROM arena_rooms').n],['전체 경기',c.total],['대기 경기',c.waiting],['신청 접수',c.requested],['진행 경기',c.active],['종료 경기',c.finished],['발송 대기',one('SELECT COUNT(*) n FROM outbox').n]];
+const feeEvents=all("SELECT s.match_id,s.fee_micro,s.payout_micro,s.created,s.winner,e.stake_a,e.stake_b FROM money_settlements s JOIN money_escrow e ON e.match_id=s.match_id WHERE s.decision='winner' AND s.fee_micro>0 ORDER BY s.created DESC,s.match_id DESC LIMIT 15");
+content='<div class="grid">'+metrics.map(([k,v])=>'<section><small>'+esc(k)+'</small><div class="metric">'+esc(v)+'</div></section>').join('')+'</div>'+
+'<section><h2>경기 수수료 누적 내역</h2><p>실제 완료된 유료 경기의 정산 원장에서 합산합니다. 수수료는 총 판돈의 3%이며 무료·무승부·중단 경기에서는 적립되지 않습니다. 입금액이나 회원 잔액 조절은 경기 수수료에 포함하지 않습니다.</p>'+
+table(['경기 번호','총 판돈 (USDT)','수수료 (USDT)','승리자 지급 (USDT)','적립 시각'],feeEvents.map(x=>tr([x.match_id,usdtDisplay(BigInt(x.stake_a)+BigInt(x.stake_b)),usdtDisplay(x.fee_micro),usdtDisplay(x.payout_micro),date(x.created)])))+
+'<p><a href="/admin?tab=settlement">전체 정산 원장 확인</a></p></section>'+
+'<section><h2>시스템 상태</h2><p>웹훅: '+(webhookReady?'연결 정상':'확인 중')+' · 신규 매치: '+(setting('matches_enabled','1')==='1'?'허용':'중단')+'</p><p>무료·USDT 대전 운영 · 외부 자동 출금은 별도 연동</p></section>';
 }
-if(tab==='users'){const rows=all("SELECT u.*, (SELECT COUNT(*) FROM matches m WHERE m.owner=u.id OR m.guest=u.id) AS matches FROM arena_users u WHERE CAST(id AS TEXT) LIKE ? OR name LIKE ? OR username LIKE ? ORDER BY last_seen DESC LIMIT 50 OFFSET ?",like,like,like,offset);
-content='<section><h2>회원 목록</h2><p>봇이 수신한 사용자만 등록됩니다. 이용 제한은 신규 봇 상호작용을 차단하며 기존 경기 결과는 변경하지 않습니다.</p>'+finder()+table(['ID','이름','아이디','최초 접속','최근 접속','경기 수','상태','관리','메모'],rows.map(r=>tr([r.id,r.name,r.username?'@'+r.username:'-',date(r.first_seen),date(r.last_seen),r.matches,r.blocked?'제한':'정상'],'<td>'+form(r.blocked?'unblock':'block',r.id,'',r.blocked?'해제':'제한')+'</td><td>'+form('note',r.id,'<input name="value" maxlength="500" value="'+esc(r.note)+'" placeholder="운영 메모">','저장')+'</td>')))+paging()+'</section>';}
+if(tab==='users'){
+const rows=all("SELECT u.*, COALESCE(w.balance_micro,0) AS wallet_balance, (SELECT COUNT(*) FROM matches m WHERE m.owner=u.id OR m.guest=u.id) AS matches FROM arena_users u LEFT JOIN tron_wallets w ON w.user_id=u.id WHERE CAST(u.id AS TEXT) LIKE ? OR u.name LIKE ? OR u.username LIKE ? ORDER BY u.last_seen DESC LIMIT 50 OFFSET ?",like,like,like,offset);
+const walletActions=r=>{
+ const hidden='<input type="hidden" name="user_id" value="'+esc(r.id)+'"><input type="hidden" name="return_tab" value="users"><input type="hidden" name="return_search" value="'+esc(search)+'"><input type="hidden" name="request_key" value="'+randomBytes(16).toString('hex')+'">';
+ const inputs='<input name="amount" inputmode="decimal" placeholder="금액 USDT" aria-label="조절 금액 USDT" required><input name="reference" minlength="3" maxlength="160" placeholder="관리 사유" aria-label="잔액 조절 사유" required>';
+ return '<td><div><strong>'+esc(usdtDisplay(r.wallet_balance))+' USDT</strong></div>'+
+ form('wallet_manual_credit','',hidden+inputs,'+ 추가')+
+ form('wallet_manual_debit','',hidden.replace(/name="request_key" value="[a-f0-9]+"/,'name="request_key" value="'+randomBytes(16).toString('hex')+'"')+inputs,'− 차감')+'</td>';
+};
+content='<section><h2>회원 목록 · 바로 잔액 조절</h2><p>회원별 현재 USDT 잔액과 금액 조절을 한 화면에서 확인합니다. 각 회원의 추가·차감 버튼은 해당 회원에게만 적용되며 ID를 다시 입력할 필요가 없습니다. 조절 내역은 별도 원장에 남습니다.</p>'+finder()+table(['ID','이름','아이디','현재 잔액·바로 조절','최근 접속','경기 수','상태','관리','메모'],rows.map(r=>tr([r.id,r.name,r.username?'@'+r.username:'-'],walletActions(r)+tr([date(r.last_seen),r.matches,r.blocked?'제한':'정상']).replace(/^<tr>|<\\/tr>$/g,'')+'<td>'+form(r.blocked?'unblock':'block',r.id,'',r.blocked?'해제':'제한')+'</td><td>'+form('note',r.id,'<input name="value" maxlength="500" value="'+esc(r.note)+'" placeholder="운영 메모">','저장')+'</td>')))+paging()+'</section>';
+}
 if(tab==='rooms'){
 const rows=all("SELECT r.*, (SELECT COUNT(*) FROM matches m WHERE m.chat=r.id AND m.state IN ('waiting','requested','active')) AS open, (SELECT m.state FROM matches m WHERE m.chat=r.id ORDER BY id DESC LIMIT 1) AS latest_match_state, (SELECT g.status FROM generated_rooms g WHERE g.chat=r.id LIMIT 1) AS generated_status, (SELECT q.status FROM match_requests q JOIN generated_rooms g ON g.code=q.room_code WHERE g.chat=r.id ORDER BY q.updated DESC LIMIT 1) AS request_status, (SELECT v.state FROM match_continue_votes v JOIN match_requests q ON q.code=v.code JOIN generated_rooms g ON g.code=q.room_code WHERE g.chat=r.id ORDER BY v.updated DESC LIMIT 1) AS close_state, (SELECT q.code FROM match_requests q JOIN generated_rooms g ON g.code=q.room_code WHERE g.chat=r.id ORDER BY q.updated DESC LIMIT 1) AS match_code FROM arena_rooms r WHERE CAST(r.id AS TEXT) LIKE ? OR r.title LIKE ? ORDER BY r.last_seen DESC LIMIT 50 OFFSET ?",like,like,offset);
 content='<section><h2>전용 대전방 목록</h2><p>경기 종료와 텔레그램 그룹 삭제를 구분해 표시합니다. 삭제 확인 상태는 실제 삭제 성공 기록에 따라 결정됩니다. 일반 그룹 사용 중단은 방 삭제가 아닙니다.</p>'+finder()+table(['그룹 번호','그룹명','최근 접속','진행·대기','경기·방 상태','관리'],rows.map(r=>{
