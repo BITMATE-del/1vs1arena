@@ -22,6 +22,27 @@ export function createWalletOps(db,options={}){
    db.exec('RELEASE manual_wallet_op');return {ok:true,before:Number(prior),after:Number(next)};
   }catch(e){db.exec('ROLLBACK TO manual_wallet_op');db.exec('RELEASE manual_wallet_op');throw e;}
  }
+ function invoiceAction(id,action,actor,reference=''){
+  const who=String(actor||'').slice(0,100),ref=String(reference||'').trim();
+  if(!Number.isSafeInteger(id)||id<=0||!['credit','reject'].includes(action)||!who)return {ok:false,reason:'INVALID_INPUT'};
+  db.exec('SAVEPOINT process_invoice');
+  try{
+   const inv=get('SELECT * FROM treasury_invoices WHERE id=?',id);
+   if(!inv||!['pending','expired'].includes(inv.status)){db.exec('ROLLBACK TO process_invoice');db.exec('RELEASE process_invoice');return {ok:false,reason:'ALREADY_PROCESSED'};}
+   if(action==='credit'&&(ref.length<3||ref.length>160)){db.exec('ROLLBACK TO process_invoice');db.exec('RELEASE process_invoice');return {ok:false,reason:'REFERENCE_REQUIRED'};}
+   if(action==='credit'){
+    const amount=BigInt(inv.amount_micro);
+    const display=String(amount/1000000n)+'.'+String(amount%1000000n).padStart(6,'0');
+    const result=operate({user:inv.user_id,kind:'manual_deposit',amount:display,reference:ref,actor:who,requestKey:'invoice-'+id+'-manual-credit'});
+    if(!result.ok){db.exec('ROLLBACK TO process_invoice');db.exec('RELEASE process_invoice');return result;}
+   }
+   const status=action==='credit'?'manual_credited':'rejected';
+   const updated=run('UPDATE treasury_invoices SET status=?,paid=CASE WHEN ?=? THEN ? ELSE paid END WHERE id=? AND status=?',status,action,'credit',now(),id,inv.status);
+   if(!updated.changes)throw Error('INVOICE_CONFLICT');
+   db.exec('RELEASE process_invoice');
+   return {ok:true,user:inv.user_id,amount:inv.amount_micro,status};
+  }catch(e){db.exec('ROLLBACK TO process_invoice');db.exec('RELEASE process_invoice');throw e;}
+ }
  function withdrawal(id,action,actor,txid=''){
   const who=String(actor||'').slice(0,100);
   if(!Number.isSafeInteger(id)||id<=0||!['approve','reject','paid'].includes(action)||!who)return {ok:false,reason:'INVALID_INPUT'};
@@ -48,5 +69,5 @@ export function createWalletOps(db,options={}){
    db.exec('RELEASE manual_withdrawal');return {ok:true,user:row.user_id,amount:row.amount_micro,address:row.to_address,status,txid:hash};
   }catch(e){db.exec('ROLLBACK TO manual_withdrawal');db.exec('RELEASE manual_withdrawal');throw e;}
  }
- return {operate,withdrawal,adjustments:(limit=60)=>all('SELECT * FROM wallet_manual_ops ORDER BY id DESC LIMIT ?',Math.min(100,Math.max(1,limit))),withdrawalActions:(limit=60)=>all('SELECT * FROM wallet_withdrawal_actions ORDER BY id DESC LIMIT ?',Math.min(100,Math.max(1,limit)))};
+ return {operate,withdrawal,invoiceAction,adjustments:(limit=60)=>all('SELECT * FROM wallet_manual_ops ORDER BY id DESC LIMIT ?',Math.min(100,Math.max(1,limit))),withdrawalActions:(limit=60)=>all('SELECT * FROM wallet_withdrawal_actions ORDER BY id DESC LIMIT ?',Math.min(100,Math.max(1,limit)))};
 }
