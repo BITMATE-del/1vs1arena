@@ -277,7 +277,7 @@ function validSecret(req){const a=Buffer.from(String(req.headers['x-telegram-bot
 
 const adminPassword=process.env.ADMIN_PASSWORD||'';
 const telegramAuth=createTelegramAuth(db,secret,adminPassword);
-const roomService=createRoomService(db,telegramAuth,username,send);
+const roomService=createRoomService(db,telegramAuth,()=>username,send);
 const matchBoard=createMatchBoard(db,enqueue);
 let matchFlow;
 const matchWatch=createMatchWatch(db,send,{getConfig:(k)=>setting(k,''),onTimeout:(id)=>matchFlow?.timeoutMatch(id)});
