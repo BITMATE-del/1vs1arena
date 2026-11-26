@@ -23,6 +23,7 @@ export function matchSettlementPreview(m,a,b){
 }
 export function createSettlementJournal(db,options={}){
  db.exec("CREATE TABLE IF NOT EXISTS match_settlement_decisions(match_id INTEGER PRIMARY KEY,created INTEGER NOT NULL,match_state TEXT NOT NULL,decision TEXT NOT NULL,reason TEXT NOT NULL,fee_bps INTEGER NOT NULL,winner_id INTEGER,snapshot_json TEXT NOT NULL,policy_version TEXT NOT NULL,digest_sha256 TEXT NOT NULL,execution_state TEXT NOT NULL DEFAULT 'preview_only' CHECK(execution_state='preview_only'));CREATE TABLE IF NOT EXISTS match_settlement_meta(key TEXT PRIMARY KEY,value TEXT NOT NULL)");
+ db.exec("CREATE TABLE IF NOT EXISTS settlement_preexisting_open(match_id INTEGER PRIMARY KEY)");
  db.exec("CREATE TRIGGER IF NOT EXISTS settlement_decisions_no_update BEFORE UPDATE ON match_settlement_decisions BEGIN SELECT RAISE(ABORT,'SETTLEMENT_AUDIT_IMMUTABLE');END");
  db.exec("CREATE TRIGGER IF NOT EXISTS settlement_decisions_no_delete BEFORE DELETE ON match_settlement_decisions BEGIN SELECT RAISE(ABORT,'SETTLEMENT_AUDIT_IMMUTABLE');END");
  // Snapshot cutoff prevents retroactively treating historical free games as fee bearing.
@@ -32,9 +33,16 @@ export function createSettlementJournal(db,options={}){
    const max=one('SELECT COALESCE(MAX(id),0) AS id FROM matches').id;
    run("INSERT OR IGNORE INTO match_settlement_meta(key,value) VALUES('starting_match_id',?)",String(max));
  }
+ // Existing active games are eligible for audit when they later finish;
+ // already terminal historical free games are excluded.
+ if(!one("SELECT value FROM match_settlement_meta WHERE key='preexisting_open_snapshotted'")){
+   const start=Number(one("SELECT value FROM match_settlement_meta WHERE key='starting_match_id'").value);
+   run("INSERT OR IGNORE INTO settlement_preexisting_open(match_id) SELECT id FROM matches WHERE id<=? AND state NOT IN ('finished','cancelled')",start);
+   run("INSERT OR IGNORE INTO match_settlement_meta(key,value) VALUES('preexisting_open_snapshotted','1')");
+ }
  const cutoff=Number(one("SELECT value FROM match_settlement_meta WHERE key='starting_match_id'").value);
  function record(m){
-   if(!m||Number(m.id)<=cutoff)return {status:'historical_skipped'};
+   if(!m||(Number(m.id)<=cutoff&&!one('SELECT 1 FROM settlement_preexisting_open WHERE match_id=?',m.id)))return {status:'historical_skipped'};
    const decision=classifyMatch(m);
    if(!decision)return {status:'not_terminal'};
    const prior=one('SELECT * FROM match_settlement_decisions WHERE match_id=?',m.id);
@@ -50,7 +58,7 @@ export function createSettlementJournal(db,options={}){
    return {status:result.changes?'recorded':'already_recorded',entry:one('SELECT * FROM match_settlement_decisions WHERE match_id=?',m.id)};
  }
  function reconcile(limit=50){
-   const pending=all("SELECT m.* FROM matches m LEFT JOIN match_settlement_decisions d ON d.match_id=m.id WHERE m.id>? AND m.state IN ('finished','cancelled') AND d.match_id IS NULL ORDER BY m.id LIMIT ?",cutoff,Math.max(1,Math.min(100,limit)));
+   const pending=all("SELECT m.* FROM matches m LEFT JOIN match_settlement_decisions d ON d.match_id=m.id WHERE (m.id>? OR EXISTS (SELECT 1 FROM settlement_preexisting_open x WHERE x.match_id=m.id)) AND m.state IN ('finished','cancelled') AND d.match_id IS NULL ORDER BY m.id LIMIT ?",cutoff,Math.max(1,Math.min(100,limit)));
    let recorded=0,errors=0;
    for(const m of pending){try{if(record(m).status==='recorded')recorded++;}catch(e){errors++;console.warn('Settlement audit record failed:',String(e.message||e).slice(0,100));}}
    return {recorded,errors};
