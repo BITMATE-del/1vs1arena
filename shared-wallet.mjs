@@ -71,7 +71,7 @@ export function createSharedWallet(db,send,opts={}){
     const addr=treasury(),t=now(),amount=BigInt(tx.amount);
     if(!addr||amount>BigInt(Number.MAX_SAFE_INTEGER))return false;
     if(one('SELECT 1 FROM tron_deposits WHERE txid=? AND address=?',tx.txid,addr))return false;
-    if(one("SELECT 1 FROM wallet_manual_ops WHERE kind='manual_deposit' AND lower(reference)=?",tx.txid.toLowerCase()))return false;
+    if(one("SELECT 1 FROM sqlite_master WHERE type='table' AND name='wallet_manual_ops'")&&one("SELECT 1 FROM wallet_manual_ops WHERE kind='manual_deposit' AND lower(reference)=?",tx.txid.toLowerCase()))return false;
     const intent=one("SELECT * FROM treasury_invoices WHERE address=? AND amount_micro=? AND status='pending' AND created<=? AND expires>=? LIMIT 1",addr,Number(amount),tx.timestamp,tx.timestamp);
     if(!intent){recordUnmatched(tx,'NO_ACTIVE_MATCH');return false;}
     if(tx.timestamp<Number(cfg('active_from')||0))return false;
