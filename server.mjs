@@ -550,8 +550,8 @@ const msg={RETRY_EXHAUSTED:'텔레그램 서버가 인증 요청을 처리하지
 const notices=url.searchParams.get('result');const notice=notices?'<section role="status" aria-live="polite"><p>'+esc(msg[notices]||'요청 결과를 확인하세요.')+'</p></section>':'';
 const field=(name,label,type='text',placeholder='')=>'<label>'+label+'<input name="'+name+'" type="'+type+'" placeholder="'+esc(placeholder)+'" required autocomplete="off"></label>';
 const sendForm=(name,fields,label)=>form(name,'',fields,label);
-const state=a.connected?'<p><b>연결된 계정</b> · '+esc(a.name||'-')+' '+(a.username?'@'+esc(a.username):'')+' · ID '+esc(a.id)+'</p>':'<p>현재 연결된 사용자 계정이 없습니다.</p>';
-content=notice+'<section><h2>그룹 생성 전용 계정</h2>'+state+table(['항목','상태'],[tr(['API ID',a.configured?'등록 완료':'확인 필요']),tr(['사용자 세션',a.connected?'암호화 저장 완료':'미등록']),tr(['최근 인증 오류',a.lastError||'없음']),tr(['인증 진행',a.stage==='code'?'인증번호 입력 대기':a.stage==='password'?'2단계 비밀번호 입력 대기':'대기'])])+(a.connected?sendForm('tg_verify','','연결 확인')+sendForm('tg_logout','','연결 해제'):'')+'</section>';
+const state=a.connected?'<p><b>연결된 계정</b> · '+esc(a.name||'-')+' '+(a.username?'@'+esc(a.username):'')+' · ID '+esc(a.id)+'</p>':a.lastError==='SESSION_DECRYPT_FAILED'?'<p class="error"><b>그룹 생성 계정 재인증 필요</b> · 저장된 세션을 읽을 수 없습니다. 전화번호로 다시 로그인하거나 유효한 StringSession을 등록하세요. 기존 데이터는 삭제하지 않습니다.</p>':'<p>현재 연결된 사용자 계정이 없습니다.</p>';
+content=notice+'<section><h2>그룹 생성 전용 계정</h2>'+state+table(['항목','상태'],[tr(['API ID',a.configured?'등록 완료':'확인 필요']),tr(['사용자 세션',a.connected?'사용 가능':a.lastError==='SESSION_DECRYPT_FAILED'?'저장 세션 복호화 실패':'미등록']),tr(['최근 인증 오류',a.lastError||'없음']),tr(['인증 진행',a.stage==='code'?'인증번호 입력 대기':a.stage==='password'?'2단계 비밀번호 입력 대기':'대기'])])+(a.connected?sendForm('tg_verify','','연결 확인')+sendForm('tg_logout','','연결 해제'):'')+'</section>';
 if(!a.connected)content+='<section><h2>전화번호로 로그인</h2><p>본인이 소유한 텔레그램 계정으로만 로그인하세요. 수신된 인증번호와 2단계 비밀번호는 서버에 저장되지 않습니다.</p>'+
 (a.stage==='code'?sendForm('tg_code',field('code','텔레그램 인증번호','text','12345'),'인증 완료'):
 a.stage==='password'?sendForm('tg_password',field('password','2단계 비밀번호','password'),'계정 연결'):
