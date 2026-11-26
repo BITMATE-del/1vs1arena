@@ -124,8 +124,21 @@ export function createRoomService(db,telegramAuth,botUsername,send){
   // could otherwise create multiple groups for one match.
   function recover(){
     const stale=db.prepare("SELECT * FROM generated_rooms WHERE status='creating' AND created<?").all(Date.now()-120000);
-    for(const r of stale){run("UPDATE generated_rooms SET status='failed',error='INTERRUPTED' WHERE code=?",r.code);try{callbacks.get(r.code)?.onFailed?.(r.request_code);}catch{}}
+    for(const r of stale){
+      run("UPDATE generated_rooms SET status='failed',error=? WHERE code=?",r.chat?'INTERRUPTED_PARTIAL_ROOM_CREATED':'INTERRUPTED',r.code);
+      try{callbacks.get(r.code)?.onFailed?.(r.request_code);}catch{}
+    }
+  }
+  async function cleanupPartial(code){
+    const room=getByCode(code);
+    if(!room||!room.chat||!['failed','close_failed'].includes(room.status))return false;
+    const state=room.request_code?one('SELECT status FROM match_requests WHERE code=?',room.request_code)?.status:null;
+    if(state&&!['failed','cancelled','expired'].includes(state))return false;
+    if(one("SELECT 1 FROM matches WHERE chat=? AND state IN ('waiting','requested','active') LIMIT 1",room.chat))return false;
+    // Manual cleanup only: never delete a partially-created room without admin action.
+    run("UPDATE generated_rooms SET status='close_failed' WHERE code=?",code);
+    try{return await close(code);}catch{return false;}
   }
   function isGeneratedChat(chat){return !!one('SELECT 1 FROM generated_rooms WHERE chat=?',chat);}
-  return {request,requestPair,work,getByCode,connected,finish,reopen,close,freshInvite,recover,isGeneratedChat};
+  return {request,requestPair,work,getByCode,connected,finish,reopen,close,cleanupPartial,freshInvite,recover,isGeneratedChat};
 }
