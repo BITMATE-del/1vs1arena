@@ -65,6 +65,8 @@ act(1001,-10012001200,['mf','rematch',row.code,'game','🎲']);
 act(1001,-10012001200,['mf','rematch',row.code,'mode','wins']);
 act(1001,-10012001200,['mf','rematch',row.code,'round','5']);
 act(1001,-10012001200,['mf','rematch',row.code,'stake_same']);
+assert.equal(flow.roomProgress(-10012001200),true,'room status should show rematch setup');
+assert(messages.at(-1).message.includes('상대방 최종 승인 대기'),'status reveals awaiting approval');
 assert.equal(get().status,'finished','guest must approve new rules');
 act(1002,-10012001200,['mf','rematch',row.code,'approve']);
 assert.equal(get().status,'playing');
