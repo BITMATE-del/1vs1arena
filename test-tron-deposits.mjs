@@ -34,6 +34,8 @@ assert(!service.assign(12,a),'address cannot be reused by a second member');
 assert(!service.assign(13,b),'unregistered members cannot have address');
 assert(!service.assign(12,'not-valid'),'bad address rejected');
 assert(service.assign(12,b));
+db.prepare("INSERT INTO treasury_settings(key,value) VALUES('address',?)").run(makeAddress(6));
+assert.equal(service.assign(11,makeAddress(6)),false,'shared treasury cannot be assigned as a legacy member deposit address');
 const event=(tx,address,value,contract=USDT_TRON)=>({transaction_id:tx,to:address,from:makeAddress(4),value,block_timestamp:timestamp+1000,token_info:{address:contract,decimals:6}});
 assert.equal(normalizeTransfer(event(txid,a,'9000000'),a,timestamp).amount,'9000000');
 assert.equal(normalizeTransfer(event(txid,a,'9000000','TFAKE'),a,timestamp),null);
