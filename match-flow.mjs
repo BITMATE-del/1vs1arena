@@ -118,7 +118,7 @@ export function createMatchFlow(db, send, roomService, games, modes, rounds, opt
         if(!held.ok){run('UPDATE match_requests SET ready_owner=0,ready_guest=0 WHERE code=?',code);send(chat,'⚠️ 참가금 예치 실패: 양쪽 회원의 지갑 잔액을 확인해 주세요. 두 명의 준비 상태를 초기화했습니다.');send(current.owner,'참가금 예치 실패. 회원 지갑 잔액 또는 경기 조건을 확인해 주세요.');send(current.guest,'참가금 예치 실패. 회원 지갑 잔액 또는 경기 조건을 확인해 주세요.');return;}
         send(chat,'🔒 참가금 예치 완료 · 양측 각각 '+usdt(current.stake_micro)+' USDT\n승리금은 총 판돈의 97%, 무승부·중단 시 전액 반환됩니다.');
       }
-      run("UPDATE match_requests SET status='playing',updated=? WHERE code=?",Date.now(),code);run("UPDATE matches SET state='active',turn=owner WHERE id=? AND state='waiting'",current.match_id);const room=roomService.getByCode(current.room_code);if(room?.chat)options.onMatchStart?.(current.match_id);
+      run("UPDATE match_requests SET status='playing',updated=? WHERE code=?",Date.now(),code);run("UPDATE matches SET state='active',turn=owner WHERE id=? AND state='waiting'",current.match_id);const room=roomService.getByCode(current.room_code);if(room?.chat){send(room.chat,'⚔️ 경기가 시작되었습니다!\n\n🎮 '+current.game+' · '+current.rounds+'판\n🔴 첫 번째 차례: '+name(current.owner)+' (A 참가자)\n\n주사위를 직접 전송해 주세요. 매번 결과와 다음 차례가 이 채팅에 표시됩니다.');options.onMatchStart?.(current.match_id);}
     }
     else send(chat,'✅ '+name(user)+' 님 준비 완료. 상대방 준비를 기다리고 있습니다.');
   }
