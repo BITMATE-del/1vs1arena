@@ -316,7 +316,71 @@ const roomService=createRoomService(db,telegramAuth,()=>username,send);
 const matchBoard=createMatchBoard(db,enqueue);
 let matchFlow;
 const matchWatch=createMatchWatch(db,send,{getConfig:(k)=>setting(k,''),onTimeout:(id)=>matchFlow?.timeoutMatch(id)});
-matchFlow=createMatchFlow(db,send,roomService,games,modes,rounds,{gameEnabled,money:moneyEngine,paidMatchesEnabled:()=>setting('paid_matches_enabled','1')==='1',onMatchStart:id=>{matchWatch.arm(id);matchBoard.queueMatch(id);},onMatchEnd:id=>{const m=one('SELECT * FROM matches WHERE id=?',id);if(m){const r=moneyEngine.settle(m);if(r.ok&&!r.reused){for(const u of [m.owner,m.guest])if(u)send(u,r.decision==='refund'?'↩️ 경기 종료: 참가금 전액 환급 완료 · 수수료 0%':'🏆 경기 종료: 내부 USDT 잔액 정산 완료 · 수수료 3%');}}},onMatchStopped:id=>{matchWatch.touch(id);matchBoard.queueMatch(id);},onCloseFailed:(id,code)=>matchWatch.incident('room_close_failed',id||0,'그룹 종료 실패 '+code)});
+function announceMatchSettlement(id){
+  const m=one('SELECT * FROM matches WHERE id=?',id);
+  if(!m)return;
+  const request=one('SELECT code,stake_micro FROM match_requests WHERE match_id=?',id);
+  const label=idOf=>matchBoard.player(idOf);
+  const resultWinner=m.a===m.b?null:(m.a>m.b?m.owner:m.guest);
+  const base='🏆 GLORY ARENA · 경기 결과 및 정산 안내\n'+
+    '━━━━━━━━━━━━━━\n'+
+    '🎫 매치: '+(request?.code||'#'+id)+'\n'+
+    '🎮 경기: '+m.game+' · '+m.rounds+'판\n'+
+    '👤 A: '+label(m.owner)+'\n'+
+    '👤 B: '+label(m.guest)+'\n'+
+    '📊 최종 점수: A '+m.a+' : '+m.b+' B\n'+
+    (m.state==='cancelled'?'🛑 중도 종료 · 결과 미확정\n':
+      resultWinner?'🥇 최종 승리: '+label(resultWinner)+'\n🥈 패배: '+label(resultWinner===m.owner?m.guest:m.owner)+'\n':'🤝 최종 결과: 무승부\n');
+  const escrow=moneyEngine.escrow(id);
+  if(!escrow){
+    // A free match does not create an escrow or a monetary settlement.
+    send(m.chat,base+'\n💎 대전 금액: 0 USDT (무료 경기)\n💰 지급 금액: 0 USDT\n🧾 수수료: 0 USDT\n✅ 실제 지갑 잔액 변동은 없습니다.\n\n추가 경기 여부를 선택해 주세요.');
+    return;
+  }
+  let settled;
+  try{settled=moneyEngine.settle(m);}
+  catch(e){console.error('Arena settlement pending',{match:id,reason:String(e?.message||e).slice(0,120)});}
+  const record=one('SELECT * FROM money_settlements WHERE match_id=?',id);
+  if(!settled?.ok||!record){
+    send(m.chat,base+'\n⚠️ USDT 정산 확인 중\n게임 결과는 기록되었습니다. 참가금은 정산 완료가 확인되기 전까지 지급 완료로 표시되지 않습니다.\n운영자에게 정산 상태를 확인해 주세요.');
+    return;
+  }
+  if(settled.reused)return; // Do not post duplicated announcements on repeated callbacks.
+  const stakeA=BigInt(escrow.stake_a),stakeB=BigInt(escrow.stake_b),pool=stakeA+stakeB;
+  const fmt=n=>usdtDisplay(Number(n))+' USDT';
+  const lines=['\n💎 USDT 정산 내역',
+    'A 참가금: '+fmt(stakeA),
+    'B 참가금: '+fmt(stakeB),
+    '총 판돈: '+fmt(pool)];
+  if(record.decision==='refund'){
+    lines.push('↩️ 정산 결과: '+(record.reason==='cancelled'?'중도 종료':'무승부')+' · 각자 참가금 전액 반환',
+      'A 반환액: '+fmt(stakeA),'B 반환액: '+fmt(stakeB),
+      '수수료: 0 USDT','✅ 두 회원의 내부 지갑으로 각각 환급 완료');
+  }else{
+    const winner=Number(record.winner),loser=winner===m.owner?m.guest:m.owner;
+    const prize=BigInt(record.payout_micro),fee=BigInt(record.fee_micro);
+    const winnerStake=winner===m.owner?stakeA:stakeB;
+    lines.push('🥇 수령 회원: '+label(winner),
+      '승자 지급액: '+fmt(prize)+' (참가금 포함)',
+      '승자 순손익: +'+fmt(prize-winnerStake),
+      '패자: '+label(loser)+' · 참가금 손실 '+fmt(loser===m.owner?stakeA:stakeB),
+      '운영 수수료 (총 판돈의 3%): '+fmt(fee),
+      '✅ 승자 내부 지갑으로 지급 완료');
+  }
+  send(m.chat,base+lines.join('\n')+'\n\n추가 경기 여부를 선택해 주세요.');
+  for(const user of [m.owner,m.guest]){
+    const role=user===m.owner?'A':'B';
+    const balance=moneyEngine.balance(user);
+    let status;
+    if(record.decision==='refund')status='참가금 환급 완료: '+fmt(user===m.owner?stakeA:stakeB);
+    else if(Number(record.winner)===user)status='승리 지급 완료: '+fmt(BigInt(record.payout_micro));
+    else status='패배 · 참가금 손실: '+fmt(user===m.owner?stakeA:stakeB);
+    send(user,'💎 GLORY ARENA · 개인 정산서\n'+
+      '매치: '+(request?.code||'#'+id)+'\n'+role+' '+label(user)+'\n'+
+      status+'\n현재 내부 USDT 잔액: '+fmt(balance)+'\n\n봇의 USDT 지갑 메뉴에서 거래내역을 확인하세요.');
+  }
+}
+matchFlow=createMatchFlow(db,send,roomService,games,modes,rounds,{gameEnabled,money:moneyEngine,paidMatchesEnabled:()=>setting('paid_matches_enabled','1')==='1',onMatchStart:id=>{matchWatch.arm(id);matchBoard.queueMatch(id);},onMatchEnd:id=>announceMatchSettlement(id),onMatchStopped:id=>{matchWatch.touch(id);matchBoard.queueMatch(id);},onCloseFailed:(id,code)=>matchWatch.incident('room_close_failed',id||0,'그룹 종료 실패 '+code)});
 matchWatch.sync();
 const adminAttempts=new Map();
 const adminGlobalAttempts={count:0,until:0};
