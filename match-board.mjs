@@ -67,7 +67,7 @@ export function createMatchBoard(db, enqueue) {
       text+='\n추가 경기 여부를 아래 안내에서 선택하세요.';
     }else if(m.state==='cancelled'){text+='🛑 경기 중도 종료\n승패는 확정되지 않았으며, 전용 그룹 종료가 진행됩니다.';}else{text+='경기 상태: '+m.state;}
     const canStop=active&&/^GA-[A-F0-9]{8}$/.test(code);
-    return {text,reply_markup:{inline_keyboard:canStop?[[{text:'🛑 경기 중도 종료 요청 (상호 동의)',callback_data:'mf:stop:'+code}]]:[]}};
+    return {text,reply_markup:{inline_keyboard:[...(canStop?[[{text:'🛑 경기 중도 종료 요청 (상호 동의)',callback_data:'mf:stop:'+code}]]:[]),[{text:'📣 관리자 호출',callback_data:'admincall'}]]}};
   }
   function queue(chat){const m=one("SELECT * FROM matches WHERE chat=? AND state IN ('active','finished','cancelled') ORDER BY id DESC LIMIT 1",chat);if(m)enqueue('arenaBoardSync',{chat_id:chat,match_id:m.id});}
   function queueMatch(id){const m=one('SELECT chat FROM matches WHERE id=?',id);if(m)enqueue('arenaBoardSync',{chat_id:m.chat,match_id:id});}
