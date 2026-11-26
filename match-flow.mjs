@@ -46,6 +46,7 @@ export function createMatchFlow(db, send, roomService, games, modes, rounds, opt
     send(user,'💎 대전 금액을 직접 입력해 주세요.\n\n예: 0 / 2.5 / 10 / 125.75\n\n0 USDT = 무료 대전\n0보다 큰 금액 = 양측 각각 낼 참가금\n\n승리 시 총 판돈의 3% 수수료를 공제하며, 무승부·중도 종료 시 전액 환급합니다.\n\n최대 1,000,000 USDT, 소수점 6자리까지 입력할 수 있습니다.',[[btn('❌ 대전 개설 취소','mf:cancel:'+code)]]);
   }
   db.exec("CREATE TABLE IF NOT EXISTS match_continue_votes(code TEXT PRIMARY KEY, owner_vote TEXT, guest_vote TEXT, deadline INTEGER NOT NULL, close_after INTEGER, state TEXT NOT NULL DEFAULT 'voting', last_error TEXT, updated INTEGER NOT NULL)");
+  db.exec("CREATE TABLE IF NOT EXISTS match_rematch_config(code TEXT PRIMARY KEY, game TEXT NOT NULL, mode TEXT NOT NULL, rounds INTEGER NOT NULL, stake_micro INTEGER NOT NULL, stage TEXT NOT NULL, updated INTEGER NOT NULL)");
   const votesFor=code=>one("SELECT * FROM match_continue_votes WHERE code=?",code);
   db.exec("CREATE TABLE IF NOT EXISTS match_stop_requests(code TEXT PRIMARY KEY, requested_by INTEGER NOT NULL, expires INTEGER NOT NULL, state TEXT NOT NULL DEFAULT 'pending', updated INTEGER NOT NULL)");
   const stopFor=code=>one('SELECT * FROM match_stop_requests WHERE code=?',code);
@@ -60,6 +61,22 @@ export function createMatchFlow(db, send, roomService, games, modes, rounds, opt
   const byChat=chat=>one("SELECT q.* FROM match_requests q JOIN generated_rooms r ON r.code=q.room_code WHERE r.chat=? AND q.status IN ('room_pending','room_ready','playing') ORDER BY q.created DESC LIMIT 1",chat);
   function begin(user){if(!roomService.connected()){send(user,'운영자 그룹 생성 계정이 아직 연결되지 않았습니다.');return;}if(one("SELECT 1 FROM match_requests WHERE owner=? AND status IN ('selecting','public','pending','room_pending','room_ready','playing')",user)){send(user,'기존 진행 중인 매치가 있습니다. 내 경기에서 확인하세요.',[[btn('🎮 내 경기','mf:mine')]]);return;}run('INSERT INTO match_inputs(user_id,kind,created) VALUES(?,?,?) ON CONFLICT(user_id) DO UPDATE SET kind=excluded.kind,created=excluded.created',user,'opponent',Date.now());send(user,'👤 상대방의 텔레그램 아이디를 입력해 주세요.\n예: @playername\n\n상대방도 GLORY ARENA 봇에서 /start를 한 번 눌러야 신청을 받을 수 있습니다.',[[btn('❌ 취소','mf:input_cancel')]]);}
   function onText(user,body){const input=one('SELECT * FROM match_inputs WHERE user_id=?',user);if(!input)return false;
+    if(input.kind.startsWith('rematch_stake:')){
+      const code=input.kind.slice('rematch_stake:'.length),r=get(code),v=votesFor(code),draft=one('SELECT * FROM match_rematch_config WHERE code=?',code);
+      if(!r||r.owner!==user||v?.state!=='configuring'||draft?.stage!=='stake_input'||Date.now()>v.deadline){
+        run('DELETE FROM match_inputs WHERE user_id=?',user);
+        send(user,'추가 경기 금액 입력이 만료되었습니다. 대전방에서 다시 선택해 주세요.');return true;
+      }
+      const amount=parseStake(body);
+      if(amount===null){send(user,'올바른 USDT 참가금을 입력해 주세요. 예: 0 / 2.5 / 10 (최대 1,000,000 USDT)');return true;}
+      if(amount>0&&!moneyAllowed()){send(user,'현재 유료 대전이 비활성화되어 있습니다. 0 USDT를 입력하거나 대전방에서 다시 설정해 주세요.');return true;}
+      run('DELETE FROM match_inputs WHERE user_id=?',user);
+      run("UPDATE match_rematch_config SET stake_micro=?,stage='confirm',updated=? WHERE code=?",amount,Date.now(),code);
+      const room=roomService.getByCode(r.room_code);
+      send(user,'✅ 추가 경기 금액 '+usdt(amount)+' USDT가 반영되었습니다. 상대방의 최종 동의를 받습니다.');
+      if(room?.chat)sendRematchConfirm(r,room.chat);
+      return true;
+    }
     if(input.kind.startsWith('stake:')){
       const code=input.kind.slice(6),r=get(code);
       if(!r||r.owner!==user||r.status!=='selecting'){run('DELETE FROM match_inputs WHERE user_id=?',user);send(user,'금액 입력이 만료됐습니다. 대전을 다시 개설해 주세요.');return true;}
@@ -230,6 +247,7 @@ export function createMatchFlow(db, send, roomService, games, modes, rounds, opt
     if(op==='stop'){requestStop(user,chat,code);return true;}
     if(op==='stopanswer'&&['yes','no'].includes(p[3])){approveStop(user,chat,code,p[3]);return true;}
     if(op==='again'&&['yes','no'].includes(p[3])){voteContinue(user,chat,code,p[3]);return true;}
+    if(op==='rematch'){rematchAction(user,chat,code,p[3],p[4]);return true;}
     if(op==='notice'){notice(user,code,chat);return true;}if(op==='ready'){ready(user,code,chat);return true;}
     send(user,'이미 처리된 요청이거나 권한이 없습니다.');return true;
   }
@@ -237,7 +255,7 @@ export function createMatchFlow(db, send, roomService, games, modes, rounds, opt
   function tick(){const jobs=all("SELECT * FROM match_requests WHERE status IN ('selecting','public','pending') AND expires<? LIMIT 25",Date.now());for(const r of jobs)expireOne(r);
     const pending=all("SELECT * FROM match_requests WHERE status='room_pending' LIMIT 20");for(const r of pending){const room=roomService.getByCode(r.room_code||('R-'+r.code));if(room?.status==='ready'&&room.link&&room.link_guest)groupReady(r.code,{chat:room.chat,linkOwner:room.link,linkGuest:room.link_guest,code:room.code});else if(room?.status==='failed')groupFailed(r.code);}
     for(const row of all("SELECT * FROM match_stop_requests WHERE state='pending' AND expires<? LIMIT 20",Date.now())){run("UPDATE match_stop_requests SET state='expired',updated=? WHERE code=? AND state='pending'",Date.now(),row.code);const room=get(row.code)?.room_code?roomService.getByCode(get(row.code).room_code):null;if(room?.chat)send(room.chat,'⌛ 중도 종료 요청이 만료됐습니다. 경기는 계속 진행됩니다.');}
-    for(const row of all("SELECT * FROM match_continue_votes WHERE state='voting' AND deadline<? LIMIT 20",Date.now())){const r=get(row.code);if(r)closeDecision(r,'timeout');}
+    for(const row of all("SELECT * FROM match_continue_votes WHERE state IN ('voting','configuring') AND deadline<? LIMIT 20",Date.now())){const r=get(row.code);if(r)closeDecision(r,'timeout');}
     // Repair a completed game's request state when the match result was saved
     // before a crash, without recalculating the winner or changing scores.
     const stalePlaying=all("SELECT q.code,g.chat FROM match_requests q JOIN matches m ON m.id=q.match_id JOIN generated_rooms g ON g.code=q.room_code WHERE q.status='playing' AND m.state='finished' AND q.updated<? AND g.status IN ('ready','finished') LIMIT 5",Date.now()-60000);
@@ -270,33 +288,110 @@ export function createMatchFlow(db, send, roomService, games, modes, rounds, opt
       return;
     }
     if(now.owner_vote==='yes'&&now.guest_vote==='yes'){
-      const last=one("SELECT * FROM matches WHERE id=? AND state='finished'",r.match_id);
-      if(!last){send(chat,'이전 경기 결과를 확인할 수 없습니다. 운영자에게 문의해 주세요.');return;}
-      if(r.stake_micro>0){
-        if(!moneyAllowed()||money.balance(r.owner)<BigInt(r.stake_micro)||money.balance(r.guest)<BigInt(r.stake_micro)){
-          send(chat,'⚠️ 재대전 참가금이 부족하거나 유료 매치가 중단되었습니다. 이번 경기는 종료하고 새 매치를 만들어 주세요.');closeDecision(r,'declined');return;
-        }
-      }
-      const next=Number(run("INSERT INTO matches(chat,owner,guest,game,mode,rounds,state,turn,round,a,b) VALUES(?,?,?,?,?,?,'active',?,1,0,0)",room.chat,r.owner,r.guest,r.game,r.mode,r.rounds,r.owner).lastInsertRowid);
-      if(r.stake_micro>0){
-        // The just-finished match must release escrow before a paid rematch can debit again.
-        money.reconcile();
-        const held=money.deposit(next,code,r.owner,r.guest,r.stake_micro);
-        if(!held.ok){run("UPDATE matches SET state='cancelled' WHERE id=?",next);send(chat,'재대전 참가금 예치에 실패했습니다. 새 매치를 생성해 주세요.');closeDecision(r,'declined');return;}
-      }
-      run("UPDATE match_requests SET status='playing',match_id=?,updated=? WHERE code=?",next,Date.now(),code);
-      run("UPDATE match_continue_votes SET state='rematched',updated=? WHERE code=?",Date.now(),code);
-      roomService.reopen(r.room_code);
-      options.onMatchStart?.(next);
-      send(chat,'✅ 양쪽 모두 추가 경기에 동의했습니다. 새 경기를 시작합니다.\n현재 차례와 굴리기 버튼은 상단 고정 경기판에서 확인해 주세요.');
+      run("UPDATE match_continue_votes SET state='configuring',deadline=?,updated=? WHERE code=? AND state='voting'",Date.now()+10*60000,Date.now(),code);
+      run("INSERT INTO match_rematch_config(code,game,mode,rounds,stake_micro,stage,updated) VALUES(?,?,?,?,?,'choice',?) ON CONFLICT(code) DO UPDATE SET game=excluded.game,mode=excluded.mode,rounds=excluded.rounds,stake_micro=excluded.stake_micro,stage='choice',updated=excluded.updated",code,r.game,r.mode,r.rounds,r.stake_micro,Date.now());
+      send(chat,'✅ 양쪽 모두 계속하기를 선택했습니다.\\n\\n🎮 게임 종목과 💎 참가금을 변경하시겠습니까?\\n기존 조건: '+r.game+' '+modes[r.mode]+' · '+r.rounds+'판 / 1인 '+usdt(r.stake_micro)+' USDT\\n\\n개설자 '+name(r.owner)+' 님이 선택한 뒤 상대방이 최종 확인합니다.',[[btn('✅ 기존 조건 그대로','mf:rematch:'+code+':same')],[btn('⚙️ 종목·금액 변경','mf:rematch:'+code+':change')],[btn('❌ 재대결 취소','mf:rematch:'+code+':cancel')]]);
       return;
     }
     closeDecision(r,'declined');
   }
+  function sendRematchConfirm(r,chat){
+    const draft=one('SELECT * FROM match_rematch_config WHERE code=?',r.code);
+    if(!draft||draft.stage!=='confirm')return;
+    send(chat,'📋 추가 경기 조건 최종 확인\n\n'+
+      '🎮 게임: '+draft.game+' '+(games[draft.game]?.[0]||'')+'\n'+
+      '🏅 방식: '+(modes[draft.mode]||draft.mode)+'\n'+
+      '📍 횟수: '+draft.rounds+'판\n'+
+      '💎 1인 참가금: '+usdt(draft.stake_micro)+' USDT\n'+
+      '💰 총 판돈: '+usdt(draft.stake_micro*2)+' USDT\n'+
+      (draft.stake_micro>0?'🧾 승부 확정 시 총 판돈의 3% 수수료\n':'✅ 무료 경기 · 수수료 없음\n')+
+      '\n상대방 '+name(r.guest)+' 님이 승인하면 새 경기가 시작됩니다. 참가금은 승인 후 다시 예치됩니다.',
+      [[btn('✅ 변경 조건 승인·시작','mf:rematch:'+r.code+':approve')],[btn('❌ 거절·종료','mf:rematch:'+r.code+':cancel')]]);
+  }
+  function launchRematch(r,chat,draft){
+    const previous=one("SELECT * FROM matches WHERE id=? AND state='finished'",r.match_id);
+    if(!previous)return {ok:false,reason:'이전 경기 결과를 찾지 못했습니다.'};
+    if(!games[draft.game]||options.gameEnabled?.(draft.game)===false||!modes[draft.mode]||
+      (isSpecialMode(draft.mode)&&draft.game!=='🎲')||!rounds.includes(draft.rounds)){
+      return {ok:false,reason:'선택한 게임 조건을 사용할 수 없습니다.'};
+    }
+    if(draft.stake_micro>0&&(!moneyAllowed()||money.balance(r.owner)<BigInt(draft.stake_micro)||money.balance(r.guest)<BigInt(draft.stake_micro))){
+      return {ok:false,reason:'양쪽 참가금 잔액이 부족하거나 유료 대전이 비활성화되어 있습니다.'};
+    }
+    const next=Number(run("INSERT INTO matches(chat,owner,guest,game,mode,rounds,state,turn,round,a,b) VALUES(?,?,?,?,?,?,'waiting',?,1,0,0)",chat,r.owner,r.guest,draft.game,draft.mode,draft.rounds,r.owner).lastInsertRowid);
+    if(draft.stake_micro>0){
+      // Never start a paid rematch until both balances have been atomically held.
+      const held=money.deposit(next,r.code,r.owner,r.guest,draft.stake_micro);
+      if(!held.ok){run("UPDATE matches SET state='cancelled' WHERE id=?",next);return {ok:false,reason:'참가금 예치 실패: 양쪽 지갑 잔액을 확인해 주세요.'};}
+    }
+    run("UPDATE matches SET state='active' WHERE id=? AND state='waiting'",next);
+    run("UPDATE match_requests SET status='playing',match_id=?,game=?,mode=?,rounds=?,stake_micro=?,updated=? WHERE code=? AND status='finished'",
+      next,draft.game,draft.mode,draft.rounds,draft.stake_micro,Date.now(),r.code);
+    run("UPDATE match_continue_votes SET state='rematched',updated=? WHERE code=? AND state='configuring'",Date.now(),r.code);
+    run("UPDATE match_rematch_config SET stage='started',updated=? WHERE code=?",Date.now(),r.code);
+    roomService.reopen(r.room_code);
+    options.onMatchStart?.(next);
+    send(chat,'⚔️ 추가 경기가 시작되었습니다!\n\n'+draft.game+' · '+(modes[draft.mode]||draft.mode)+' · '+draft.rounds+'판\n'+
+      '💎 1인 참가금: '+usdt(draft.stake_micro)+' USDT'+(draft.stake_micro>0?' (양측 예치 완료)':' (무료)')+'\n'+
+      '🔴 첫 차례: '+name(r.owner)+' (A)\n\n주사위를 직접 전송해 주세요.');
+    return {ok:true};
+  }
+  function rematchAction(user,chat,code,action,value){
+    const r=get(code),v=votesFor(code),room=r?.room_code?roomService.getByCode(r.room_code):null;
+    if(!r||r.status!=='finished'||v?.state!=='configuring'||room?.chat!==chat||![r.owner,r.guest].includes(user))return;
+    if(Date.now()>v.deadline){closeDecision(r,'timeout');return;}
+    const draft=one('SELECT * FROM match_rematch_config WHERE code=?',code);
+    if(!draft)return;
+    if(action==='cancel'){
+      send(chat,'❌ '+name(user)+' 님이 추가 경기를 취소했습니다. 기존 결과는 보존하고 대전방을 종료합니다.');
+      closeDecision(r,'declined');return;
+    }
+    if(action==='approve'){
+      if(user!==r.guest||draft.stage!=='confirm')return;
+      const result=launchRematch(r,chat,draft);
+      if(!result.ok)send(chat,'⚠️ 추가 경기 시작 실패: '+result.reason+'\n조건을 다시 설정하거나 종료해 주세요.',[[btn('🔄 조건 다시 설정','mf:rematch:'+code+':change')],[btn('❌ 종료','mf:rematch:'+code+':cancel')]]);
+      return;
+    }
+    if(user!==r.owner)return;
+    if(action==='same'&&draft.stage==='choice'){
+      run("UPDATE match_rematch_config SET stage='confirm',updated=? WHERE code=?",Date.now(),code);
+      sendRematchConfirm(r,chat);return;
+    }
+    if(action==='change'&&['choice','confirm','game','mode','round','stake_choice','stake_input'].includes(draft.stage)){
+      run("UPDATE match_rematch_config SET stage='game',updated=? WHERE code=?",Date.now(),code);
+      run("DELETE FROM match_inputs WHERE user_id=? AND kind=?",user,'rematch_stake:'+code);
+      send(chat,'🎮 추가 경기 종목을 선택해 주세요. (개설자 '+name(user)+')',
+        Object.keys(games).filter(g=>options.gameEnabled?.(g)!==false).map(g=>[btn(g+' '+games[g][0],'mf:rematch:'+code+':game:'+g)]));
+      return;
+    }
+    if(action==='game'&&draft.stage==='game'&&games[value]&&options.gameEnabled?.(value)!==false){
+      run("UPDATE match_rematch_config SET game=?,stage='mode',updated=? WHERE code=?",value,Date.now(),code);
+      send(chat,'🏅 경기 방식을 선택해 주세요.',Object.entries(modes).filter(([m])=>value==='🎲'||!isSpecialMode(m)).map(([k,v])=>[btn(v,'mf:rematch:'+code+':mode:'+k)]));return;
+    }
+    if(action==='mode'&&draft.stage==='mode'&&modes[value]&&(!isSpecialMode(value)||draft.game==='🎲')){
+      run("UPDATE match_rematch_config SET mode=?,stage='round',updated=? WHERE code=?",value,Date.now(),code);
+      send(chat,'📍 몇 판으로 진행하시겠습니까?', [rounds.map(n=>btn(n+'판','mf:rematch:'+code+':round:'+n))]);return;
+    }
+    if(action==='round'&&draft.stage==='round'&&rounds.includes(Number(value))){
+      run("UPDATE match_rematch_config SET rounds=?,stage='stake_choice',updated=? WHERE code=?",Number(value),Date.now(),code);
+      send(chat,'💎 참가금도 변경하시겠습니까?\n현재 1인 '+usdt(r.stake_micro)+' USDT',[[btn('✅ 기존 금액 유지','mf:rematch:'+code+':stake_same')],[btn('✏️ 금액 변경','mf:rematch:'+code+':stake_change')]]);return;
+    }
+    if(action==='stake_same'&&draft.stage==='stake_choice'){
+      run("UPDATE match_rematch_config SET stake_micro=?,stage='confirm',updated=? WHERE code=?",r.stake_micro,Date.now(),code);
+      sendRematchConfirm(r,chat);return;
+    }
+    if(action==='stake_change'&&draft.stage==='stake_choice'){
+      run("UPDATE match_rematch_config SET stage='stake_input',updated=? WHERE code=?",Date.now(),code);
+      run("INSERT INTO match_inputs(user_id,kind,created) VALUES(?,?,?) ON CONFLICT(user_id) DO UPDATE SET kind=excluded.kind,created=excluded.created",user,'rematch_stake:'+code,Date.now());
+      send(user,'💎 '+code+' 추가 경기 참가금을 입력해 주세요.\n0 = 무료 경기\n예: 2.5 / 10 / 50 (USDT)\n\n입력한 금액은 상대방이 최종 승인한 뒤 예치됩니다.');
+      send(chat,'✏️ 개설자에게 참가금 입력 안내를 개인 메시지로 보냈습니다. 입력 후 이 방에서 상대방의 승인을 받습니다.');return;
+    }
+  }
   function closeDecision(r,reason){
-    const v=votesFor(r.code);if(!v||v.state!=='voting')return;
+    const v=votesFor(r.code);if(!v||!['voting','configuring'].includes(v.state))return;
     const now=Date.now();
-    run("UPDATE match_continue_votes SET state='closing',close_after=?,updated=? WHERE code=? AND state='voting'",now+15000,now,r.code);
+    run("UPDATE match_continue_votes SET state='closing',close_after=?,updated=? WHERE code=? AND state IN ('voting','configuring')",now+15000,now,r.code);
+    run("DELETE FROM match_inputs WHERE user_id=? AND kind=?",r.owner,'rematch_stake:'+r.code);
     send(roomService.getByCode(r.room_code)?.chat||r.owner,reason==='timeout'?'⌛ 추가 경기 응답 시간이 만료되었습니다. 대전방을 종료합니다.':'✅ 추가 경기를 진행하지 않기로 했습니다.\n대전방을 종료합니다.\n기존 경기 결과는 내 전적에 저장되어 있습니다.');
   }
   const closingInProgress=new Set();
