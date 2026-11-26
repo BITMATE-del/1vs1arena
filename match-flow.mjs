@@ -5,9 +5,9 @@ import { randomBytes } from 'node:crypto';
 export function parseOpponentUsername(input){
   const value=String(input??'').trim();
   let candidate=value;
-  const link=value.match(/^(?:(?:https?:\\/\\/)?(?:www\\.)?)(?:t\\.me|telegram\\.me)\\/([^/?#]+)\\/?(?:[?#].*)?$/i);
+  const link=value.match(/^(?:(?:https?:\/\/)?(?:www\.)?)(?:t\.me|telegram\.me)\/([^/?#]+)\/?(?:[?#].*)?$/i);
   if(link)candidate=link[1];
-  else if(/^(?:https?:\\/\\/|(?:www\\.)?(?:t\\.me|telegram\\.me)\\/)/i.test(value))return null;
+  else if(/^(?:https?:\/\/|(?:www\.)?(?:t\.me|telegram\.me)\/)/i.test(value))return null;
   candidate=candidate.replace(/^@/,'');
   return /^[A-Za-z0-9_]{5,32}$/.test(candidate)?candidate:null;
 }
@@ -75,7 +75,7 @@ export function createMatchFlow(db, send, roomService, games, modes, rounds, opt
     if(input.kind!=='opponent')return false;
     run('DELETE FROM match_inputs WHERE user_id=?',user);
     const username=parseOpponentUsername(body);
-    if(!username){send(user,'올바른 텔레그램 아이디 또는 프로필 링크를 입력해 주세요.\\n예: @playername 또는 https://t.me/playername',[[btn('🔄 다시 입력','mf:begin')]]);return true;}
+    if(!username){send(user,'올바른 텔레그램 아이디 또는 프로필 링크를 입력해 주세요.\n예: @playername 또는 https://t.me/playername',[[btn('🔄 다시 입력','mf:begin')]]);return true;}
     const match=one('SELECT id,username,name,blocked FROM arena_users WHERE username=? COLLATE NOCASE',username);
     if(!match||match.blocked||match.id===user){send(user,'상대방을 확인할 수 없습니다. 상대방이 먼저 봇에서 /start를 눌렀는지 확인해 주세요.',[[btn('🔄 다시 입력','mf:begin')]]);return true;}
     const code='GA-'+randomBytes(4).toString('hex').toUpperCase();const now=Date.now();
