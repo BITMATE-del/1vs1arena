@@ -26,9 +26,14 @@ export function createBotOperations(db,send,botAdmin,walletOps,getMatchFlow,opti
   for(const r of rows)send(admin,'#'+r.id+' · '+(r.username?'@'+r.username:'회원 '+r.user_id)+'\n'+usdtDisplay(r.amount_micro)+' USDT\n'+r.to_address+'\n상태: '+r.status,
    ['requested','approved'].includes(r.status)?[[...(r.status==='requested'?[b('✅ 승인','ba:wa:'+r.id)]:[]),b('❌ 거절·환급','ba:wr:'+r.id)]]:undefined);
  }
- function users(admin){
-  const rows=all("SELECT u.id,u.username,u.name,u.blocked,COALESCE(w.balance_micro,0) balance_micro FROM arena_users u LEFT JOIN tron_wallets w ON w.user_id=u.id ORDER BY u.last_seen DESC LIMIT 12");
-  send(admin,'👥 회원 관리 · 최근 12명\n\n회원 이름을 눌러 잔액·이용제한 상태를 관리하세요.',[[b('🔎 회원 ID 검색','ba:search')],[b('🏠 관리자 메인','ba:home')]]);
+ function users(admin,page=0){
+  page=Math.max(0,Math.min(1000,Number.isSafeInteger(page)?page:0));
+  const rows=all("SELECT u.id,u.username,u.name,u.blocked,COALESCE(w.balance_micro,0) balance_micro FROM arena_users u LEFT JOIN tron_wallets w ON w.user_id=u.id ORDER BY u.last_seen DESC LIMIT 10 OFFSET ?",page*10);
+  const count=one('SELECT COUNT(*) n FROM arena_users').n;
+  const paging=[];
+  if(page>0)paging.push(b('◀ 이전','ba:users:'+(page-1)));
+  if((page+1)*10<count)paging.push(b('다음 ▶','ba:users:'+(page+1)));
+  send(admin,'👥 회원 관리 · '+(page+1)+'페이지 / 총 '+count+'명\n\n회원을 눌러 잔액·이용제한 상태를 관리하세요.',[[b('🔎 회원 ID 검색','ba:search')],...(paging.length?[paging]:[]),[b('🏠 관리자 메인','ba:home')]]);
   for(const u of rows)send(admin,(u.username?'@'+u.username:u.name||String(u.id))+' (ID '+u.id+')\nUSDT 잔액 '+usdtDisplay(u.balance_micro)+' · '+(u.blocked?'이용 제한':'정상'),[[b('⚙️ 회원 관리','ba:user:'+u.id)]]);
  }
  function member(admin,id){
@@ -36,9 +41,14 @@ export function createBotOperations(db,send,botAdmin,walletOps,getMatchFlow,opti
   if(!u){send(admin,'회원 정보를 찾을 수 없습니다.');return;}
   send(admin,'👤 회원 관리\n'+(u.username?'@'+u.username:u.name)+' · ID '+u.id+'\n잔액 '+usdtDisplay(u.balance_micro)+' USDT\n상태 '+(u.blocked?'이용 제한':'정상'),[[b('➕ 잔액 추가','ba:uc:'+id),b('➖ 잔액 차감','ba:ud:'+id)],[b(u.blocked?'🔓 이용 제한 해제':'🔒 이용 제한','ba:ub:'+id)],[b('◀ 회원 목록','ba:users')]]);
  }
- function rooms(admin){
-  const rows=all("SELECT r.id,r.title,r.enabled,g.status AS generated_status FROM arena_rooms r LEFT JOIN generated_rooms g ON g.chat=r.id ORDER BY r.last_seen DESC LIMIT 12");
-  send(admin,'🏠 대전방 관리 · 최근 12개\n\n방을 선택해 운영 상태를 확인하고 이용을 제한하거나 종료할 수 있습니다.',[[b('🏠 관리자 메인','ba:home')]]);
+ function rooms(admin,page=0){
+  page=Math.max(0,Math.min(1000,Number.isSafeInteger(page)?page:0));
+  const rows=all("SELECT r.id,r.title,r.enabled,g.status AS generated_status FROM arena_rooms r LEFT JOIN generated_rooms g ON g.chat=r.id ORDER BY r.last_seen DESC LIMIT 10 OFFSET ?",page*10);
+  const count=one('SELECT COUNT(*) n FROM arena_rooms').n;
+  const paging=[];
+  if(page>0)paging.push(b('◀ 이전','ba:rooms:'+(page-1)));
+  if((page+1)*10<count)paging.push(b('다음 ▶','ba:rooms:'+(page+1)));
+  send(admin,'🏠 방 관리 · '+(page+1)+'페이지 / 총 '+count+'개\n\n방을 선택해 운영 상태를 확인하거나 종료할 수 있습니다.',[...(paging.length?[paging]:[]),[b('🏠 관리자 메인','ba:home')]]);
   for(const r of rows)send(admin,(r.title||'대전방')+'\n방 ID '+r.id+' · '+(r.enabled?'운영 중':'봇 중단')+' · '+(r.generated_status||'일반 그룹'),[[b('⚙️ 방 관리','ba:room:'+r.id)]]);
  }
  function room(admin,id){
@@ -63,8 +73,8 @@ export function createBotOperations(db,send,botAdmin,walletOps,getMatchFlow,opti
   if(action==='home'){home(admin);return true;}
   if(action==='deposits'){deposits(admin);return true;}
   if(action==='withdrawals'){withdrawals(admin);return true;}
-  if(action==='users'){users(admin);return true;}
-  if(action==='rooms'){rooms(admin);return true;}
+  if(action==='users'){users(admin,Number(param||0));return true;}
+  if(action==='rooms'){rooms(admin,Number(param||0));return true;}
   if(action==='cancel'){run('DELETE FROM bot_admin_inputs WHERE admin_id=?',admin);home(admin);return true;}
   if(action==='search'){prompt(admin,'search',0);return true;}
   const id=Number(param);
@@ -140,7 +150,7 @@ export function createBotOperations(db,send,botAdmin,walletOps,getMatchFlow,opti
  function callFromRoom(chat,title,member,messageId){
   if(!Number.isSafeInteger(chat)||chat>=0||!Number.isSafeInteger(member)||member<=0)return {ok:false,reason:'INVALID_CALL'};
   const r=one('SELECT enabled,title FROM arena_rooms WHERE id=?',chat);
-  if(!r||r.enabled===0)return {ok:false,reason:'UNKNOWN_ROOM'};
+  if(!r)return {ok:false,reason:'UNKNOWN_ROOM'};
   if(!botAdmin.list().some(a=>a.enabled))return {ok:false,reason:'NO_ADMIN'};
   const recent=one('SELECT created FROM bot_room_calls WHERE room_id=? ORDER BY created DESC LIMIT 1',chat);
   if(recent&&now()-recent.created<60000)return {ok:false,reason:'COOLDOWN'};
