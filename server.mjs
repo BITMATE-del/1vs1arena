@@ -17,6 +17,7 @@ import {createSettlementJournal} from './settlement-journal.mjs';
 import {summarizeReadiness,OFFICIAL_GAMES} from './readiness.mjs';
 import {createMoneyEngine} from './money-engine.mjs';
 import {createWalletOps} from './wallet-ops.mjs';
+import {createBotOperations} from './bot-operations.mjs';
 import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
@@ -49,6 +50,7 @@ const botAdmin=createBotAdmin(db,enqueue);
 const sharedWallet=createSharedWallet(db,(user,message)=>send(user,message),{onEvent:event=>botAdmin.notify(event)});
 const moneyEngine=createMoneyEngine(db);
 const walletOps=createWalletOps(db);
+const botOperations=createBotOperations(db,send,botAdmin,walletOps,()=>matchFlow);
 const pendingWalletInput=new Map();
 
 db.exec("CREATE TABLE IF NOT EXISTS arena_users(id INTEGER PRIMARY KEY, name TEXT NOT NULL, username TEXT NOT NULL DEFAULT '', first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL, blocked INTEGER NOT NULL DEFAULT 0, note TEXT NOT NULL DEFAULT ''); CREATE TABLE IF NOT EXISTS arena_rooms(id INTEGER PRIMARY KEY, title TEXT NOT NULL, last_seen INTEGER NOT NULL, enabled INTEGER NOT NULL DEFAULT 1); CREATE TABLE IF NOT EXISTS admin_audit(id INTEGER PRIMARY KEY, at INTEGER NOT NULL, action TEXT NOT NULL, target TEXT NOT NULL); CREATE TABLE IF NOT EXISTS arena_settings(key TEXT PRIMARY KEY,value TEXT NOT NULL)");
@@ -89,6 +91,7 @@ const welcomeSetupHash='f27a916bb327294d267c9cf51a30a058c19be78304a25309a0ae278c
 function menu(chat){
 const photo=one("SELECT value FROM welcome_settings WHERE key='photo'")?.value||process.env.WELCOME_PHOTO_FILE_ID;
 const buttons=[[button('🎯 상대 지정 대결','mf:begin'),button('⏳ 매치 대기 등록','mf:public')],[button('🏛 공개 매치 대기실','mf:lobby'),button('🎮 내 경기','mf:mine')],[button('💎 USDT 지갑','wallet'),button('📊 내 전적','stats')],[button('📖 이용 안내','mf:help')]];
+if(botAdmin.isAdmin(chat))buttons.push([button('🛡 관리자 메뉴','ba:home')]);
 const caption=setting('welcome_caption','⚜️ GLORY ARENA\n━━━━━━━━━━━━━━\n승부의 끝, 영광의 시작.\n\n당신의 다음 승부를 시작하세요.\n매치를 개설하거나 대기실에서 상대를 만나보세요.\n\n1vs1 무료·USDT 대전 · 텔레그램 공식 게임');
 if(photo)enqueue('sendPhoto',{chat_id:chat,photo,caption,reply_markup:{inline_keyboard:buttons}});
 else send(chat,'GLORY ARENA\n'+caption,buttons);
@@ -197,9 +200,17 @@ const av=one('SELECT value FROM rolls WHERE match=? AND round=? AND player=?',id
 const outcome=classicRound(row,av,v),{a,b,done}=outcome;
 run('UPDATE matches SET a=?,b=?,state=?,round=?,turn=? WHERE id=?',a,b,done?'finished':'active',outcome.nextRound,outcome.nextTurn,id);
 matchWatch.touch(id);matchBoard.queueMatch(id);if(done)matchFlow.finished(cid);}
-function handle(u){track(u);const actor=u.callback_query?.from||u.message?.from;const chat=u.callback_query?.message?.chat||u.message?.chat;if(actor&&blocked(actor.id)){if(u.callback_query)enqueue('answerCallbackQuery',{callback_query_id:u.callback_query.id,text:'이용이 제한된 계정입니다.',show_alert:true});else if(chat?.type==='private')send(chat.id,'이용이 제한된 계정입니다.');return;}if(chat&&roomDisabled(chat.id)&&chat.type!=='private')return;const q=u.callback_query;
+function handle(u){track(u);const actor=u.callback_query?.from||u.message?.from;const chat=u.callback_query?.message?.chat||u.message?.chat;if(actor&&blocked(actor.id)){if(u.callback_query)enqueue('answerCallbackQuery',{callback_query_id:u.callback_query.id,text:'이용이 제한된 계정입니다.',show_alert:true});else if(chat?.type==='private')send(chat.id,'이용이 제한된 계정입니다.');return;}if(chat&&roomDisabled(chat.id)&&chat.type!=='private'&&u.callback_query?.data!=='admincall')return;const q=u.callback_query;
 if(q){const chat=q.message?.chat;if(!chat||!q.from||typeof q.data!=='string')return;const cid=chat.id,user=q.from.id,p=q.data.split(':');
 enqueue('answerCallbackQuery',{callback_query_id:q.id});
+if(p[0]==='admincall'){
+ if(!['group','supergroup'].includes(chat.type))return;
+ const result=botOperations.callFromRoom(cid,chat.title,user,q.message?.message_id);
+ if(result.ok)send(cid,'📣 관리자 호출이 전달되었습니다. 관리자 '+result.count+'명에게 이 대전방 정보가 전송되었습니다.');
+ else send(cid,result.reason==='COOLDOWN'?'최근 관리자 호출이 접수되었습니다. 잠시 후 다시 호출할 수 있습니다.':result.reason==='NO_ADMIN'?'등록된 봇 관리자가 없습니다.':'관리자 호출은 등록된 대전방에서만 가능합니다.');
+ return;
+}
+if(p[0]==='ba'){botOperations.callback(user,cid,chat.type,q.data);return;}
 if(p[0]==='mf'&&matchFlow.onCallback(user,cid,p))return;
 if(p[0]==='dice'&&/^\d+$/.test(p[1]||'')){playerDiceHelp(cid,user,Number(p[1]));return;}
 if(p[0]==='menu'){menu(cid);return;}
@@ -219,7 +230,7 @@ if(p[0]==='wo'&&['approve','reject'].includes(p[1])&&/^\\d+$/.test(p[2]||'')){
  }else send(user,'이미 처리됐거나 현재 처리할 수 없는 출금입니다. ('+result.reason+')');
  return;
 }
-if(p[0]==='botadmin'){if(botAdmin.isAdmin(user)&&cid===user)send(user,botAdmin.inbox(user),[[button('🔄 관리자 새로고침','botadmin')]]);else enqueue('answerCallbackQuery',{callback_query_id:q.id,text:'관리자 권한이 없습니다.',show_alert:true});return;}
+if(p[0]==='botadmin'){if(botAdmin.isAdmin(user)&&cid===user)botOperations.home(user);else enqueue('answerCallbackQuery',{callback_query_id:q.id,text:'관리자 권한이 없습니다.',show_alert:true});return;}
 if(p[0]==='guide'){guide(cid);return;}
 if(chat.type==='private'){if(p[0]==='choose'){matchFlow.begin(user);return;}if(p[0]==='lobby'){matchFlow.lobby(user);return;}groupLink(cid);return;}
 if(p[0]==='lobby'){lobby(cid);return;}
@@ -233,13 +244,14 @@ if(setWelcome(m))return;
 const cid=m.chat.id,t=(m.text||'').split(/\s+/)[0].split('@')[0],full=m.text||'';
 if(m.chat.type==='private'&&['/admin','/adminpanel','/ops'].includes(t)){
  if(!botAdmin.isAdmin(m.from.id)){send(cid,'관리자 권한이 없습니다. 웹 관리자에서 텔레그램 사용자 ID를 등록해야 합니다.');return;}
- send(cid,botAdmin.inbox(m.from.id),[[button('🔄 관리자 새로고침','botadmin')]]);return;
+ botOperations.home(m.from.id);return;
 }
 if(['/start','/help'].includes(t)||full==='🏠 메인 메뉴'){if(m.chat.type==='private')pendingWalletInput.delete(m.from.id);if(m.chat.type!=='private'&&roomService.isGeneratedChat(cid)){send(cid,'⚜️ 이 그룹은 GLORY ARENA 전용 대전방입니다. 경기 진행 안내는 위 공지에서 확인해 주세요.');return;}menu(cid);return;}
 if(full==='📖 이용 안내'){matchFlow.tutorial(cid);return;}
 if(m.chat.type==='private'&&['/wallet','/deposit','/balance'].includes(t)){walletMenu(cid,m.from.id);return;}
 if(m.chat.type==='private'&&t==='/deposits'){walletHistory(cid,m.from.id);return;}
 if(m.chat.type==='private'&&one("SELECT 1 FROM match_inputs WHERE user_id=? AND kind LIKE 'stake:%'",m.from.id)&&matchFlow.onText(m.from.id,full))return;
+if(m.chat.type==='private'&&botOperations.onText(m.from.id,cid,m.chat.type,full))return;
 if(m.chat.type==='private'&&handleWalletInput(cid,m.from.id,full))return;
 if(m.chat.type==='private'&&matchFlow.onText(m.from.id,full))return;
 if(m.chat.type!=='private'&&['/resume','/status'].includes(t)){const current=one("SELECT id FROM matches WHERE chat=? AND state='active' ORDER BY id DESC LIMIT 1",cid);if(current)matchBoard.queueMatch(current.id);else send(cid,'현재 진행 중인 경기가 없습니다.');void drain();return;}
