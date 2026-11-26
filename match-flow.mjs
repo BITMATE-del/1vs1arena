@@ -290,7 +290,7 @@ export function createMatchFlow(db, send, roomService, games, modes, rounds, opt
     if(now.owner_vote==='yes'&&now.guest_vote==='yes'){
       run("UPDATE match_continue_votes SET state='configuring',deadline=?,updated=? WHERE code=? AND state='voting'",Date.now()+10*60000,Date.now(),code);
       run("INSERT INTO match_rematch_config(code,game,mode,rounds,stake_micro,stage,updated) VALUES(?,?,?,?,?,'choice',?) ON CONFLICT(code) DO UPDATE SET game=excluded.game,mode=excluded.mode,rounds=excluded.rounds,stake_micro=excluded.stake_micro,stage='choice',updated=excluded.updated",code,r.game,r.mode,r.rounds,r.stake_micro,Date.now());
-      send(chat,'✅ 양쪽 모두 계속하기를 선택했습니다.\\n\\n🎮 게임 종목과 💎 참가금을 변경하시겠습니까?\\n기존 조건: '+r.game+' '+modes[r.mode]+' · '+r.rounds+'판 / 1인 '+usdt(r.stake_micro)+' USDT\\n\\n개설자 '+name(r.owner)+' 님이 선택한 뒤 상대방이 최종 확인합니다.',[[btn('✅ 기존 조건 그대로','mf:rematch:'+code+':same')],[btn('⚙️ 종목·금액 변경','mf:rematch:'+code+':change')],[btn('❌ 재대결 취소','mf:rematch:'+code+':cancel')]]);
+      send(chat,'✅ 양쪽 모두 계속하기를 선택했습니다.\n\n🎮 게임 종목과 💎 참가금을 변경하시겠습니까?\n기존 조건: '+r.game+' '+modes[r.mode]+' · '+r.rounds+'판 / 1인 '+usdt(r.stake_micro)+' USDT\n\n개설자 '+name(r.owner)+' 님이 선택한 뒤 상대방이 최종 확인합니다.',[[btn('✅ 기존 조건 그대로','mf:rematch:'+code+':same')],[btn('⚙️ 종목·금액 변경','mf:rematch:'+code+':change')],[btn('❌ 재대결 취소','mf:rematch:'+code+':cancel')]]);
       return;
     }
     closeDecision(r,'declined');
