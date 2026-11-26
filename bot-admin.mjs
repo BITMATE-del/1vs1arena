@@ -39,7 +39,7 @@ export function createBotAdmin(db,enqueue,options={}){
    return lines.join('\n');
  }
  function notify(event){
-   const key=String(event.key||'');
+   const key=String(event.key||'').toLowerCase();
    if(!/^[a-z][a-z0-9:_-]{1,145}$/.test(key))throw Error('BAD_NOTICE_KEY');
    const text=format(event);
    let count=0;
