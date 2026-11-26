@@ -50,7 +50,7 @@ export function createMatchFlow(db, send, roomService, games, modes, rounds, opt
   const votesFor=code=>one("SELECT * FROM match_continue_votes WHERE code=?",code);
   db.exec("CREATE TABLE IF NOT EXISTS match_stop_requests(code TEXT PRIMARY KEY, requested_by INTEGER NOT NULL, expires INTEGER NOT NULL, state TEXT NOT NULL DEFAULT 'pending', updated INTEGER NOT NULL)");
   const stopFor=code=>one('SELECT * FROM match_stop_requests WHERE code=?',code);
-  const finishMsg=(code,room)=>'🏆 경기가 종료되었습니다.\n\n매치 코드: '+code+'\n\n추가 경기를 계속 진행하시겠습니까?\n양쪽 참가자 모두 선택해 주세요. 두 명 모두 예를 선택하면 같은 그룹에서 새 경기를 시작합니다.\n아니오를 선택한 회원이 있으면 양쪽 응답 확인 후 그룹이 종료됩니다.';
+  const finishMsg=(code,room)=>'🏆 경기가 종료되었습니다.\n\n매치 코드: '+code+'\n\n추가 경기를 계속 진행하시겠습니까?\n양쪽 참가자 모두 선택해 주세요. 두 명 모두 예를 선택하면 게임 종목·참가금 변경 여부를 확인합니다.\n개설자가 조건을 선택하고 상대방이 최종 승인하면 같은 방에서 새 경기를 시작합니다.\n아니오를 선택한 회원이 있으면 양쪽 응답 확인 후 그룹이 종료됩니다.';
 
   const name=id=>{const u=one('SELECT name,username FROM arena_users WHERE id=?',id);return u?.username?'@'+u.username:u?.name||String(id);};
   const btn=(label,code)=>({text:label,callback_data:code});
