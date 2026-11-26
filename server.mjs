@@ -330,6 +330,8 @@ function validSecret(req){const a=Buffer.from(String(req.headers['x-telegram-bot
 
 const adminPassword=process.env.ADMIN_PASSWORD||'';
 const telegramAuth=createTelegramAuth(db,secret,adminPassword);
+// Validate and migrate an existing Telegram user session at startup without logging secrets.
+telegramAuth.info();
 const roomService=createRoomService(db,telegramAuth,()=>username,send);
 const matchBoard=createMatchBoard(db,enqueue);
 let matchFlow;
