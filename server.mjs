@@ -435,6 +435,12 @@ let raw='';for await(const chunk of req){raw+=chunk.toString();if(raw.length>120
 const q=new URLSearchParams(raw),provided=q.get('csrf')||'';
 if(!/^[a-f0-9]{64}$/.test(provided)||!timingSafeEqual(Buffer.from(provided),Buffer.from(csrf))){res.writeHead(403).end();return true;}
 const act=q.get('action'),id=Number(q.get('id')),value=q.get('value')||'';let changed=false;
+if(act==='room_cleanup_partial'){
+  const code=String(q.get('code')||'');
+  const done=/^R-GA-[A-F0-9]{8}$/.test(code)&&await roomService.cleanupPartial(code);
+  if(done)run('INSERT INTO admin_audit(at,action,target) VALUES(?,?,?)',Date.now(),'room_cleanup_partial',code);
+  res.writeHead(303,{location:'/admin?tab=telegram&saved='+Number(!!done)}).end();return true;
+}
 if(act==='notice_retry'){
   const key=String(q.get('event_key')||'');
   const event=/^match:[1-9]\d*:(?:result|free_result|missing_escrow|settlement_pending|personal:[1-9]\d*)$/.test(key)?
@@ -695,7 +701,7 @@ if(!a.connected)content+='<section><h2>전화번호로 로그인</h2><p>본인�
 a.stage==='password'?sendForm('tg_password',field('password','2단계 비밀번호','password'),'계정 연결'):
 sendForm('tg_send',field('phone','국가번호 포함 전화번호','tel','+821012345678'),'인증번호 받기'))+
 (a.stage?sendForm('tg_cancel','','인증 취소'):'')+'</section><section><h2>기존 세션 등록</h2><p>운영자 본인이 생성한 GramJS StringSession만 등록하세요. 등록되면 암호화하여 서버 DB에 저장합니다.</p>'+sendForm('tg_session','<label>StringSession<textarea name="session" maxlength="20000" rows="3" required autocomplete="off" placeholder="1..."></textarea></label>','세션 연결')+'</section>';
-content+='<section><h2>자동 생성 대전방</h2><p>등록된 사용자 계정으로 신규 비공개 그룹 생성 및 기존 봇 관리자 등록을 요청합니다.</p>'+table(['코드','생성자','그룹 ID','상태','오류'],all('SELECT * FROM generated_rooms ORDER BY created DESC LIMIT 30').map(r=>tr([r.code,r.owner,r.chat||'-',r.status,r.error||'-'])))+'</section>';
+content+='<section><h2>자동 생성 대전방</h2><p>등록된 사용자 계정으로 신규 비공개 그룹 생성 및 기존 봇 관리자 등록을 요청합니다.</p>'+table(['코드','생성자','그룹 ID','상태','오류','조치'],all('SELECT * FROM generated_rooms ORDER BY created DESC LIMIT 30').map(r=>tr([r.code,r.owner,r.chat||'-',r.status,r.error||'-'],'<td>'+(r.chat&&['failed','close_failed'].includes(r.status)?form('room_cleanup_partial','', '<input type="hidden" name="code" value="'+esc(r.code)+'">','부분 생성 방 정리'):'-')+'</td>')))+'</section>';
 }
 if(tab==='requests'){
 const rows=all('SELECT * FROM match_requests ORDER BY created DESC LIMIT 50 OFFSET ?',offset);
