@@ -20,7 +20,7 @@ function start(){
  a(101,101,'game',row.code,'🎲');
  a(101,101,'mode',row.code,'wins');
  a(101,101,'round',row.code,'1');
- a(101,101,'stake',row.code,'10');
+ assert.equal(flow.onText(101,'10'),true);
  assert.equal(latest().stake_micro,10000000);
  a(101,101,'submit',row.code);
  a(102,102,'join',row.code);
