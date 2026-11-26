@@ -397,7 +397,7 @@ export function createMatchFlow(db, send, roomService, games, modes, rounds, opt
     }
   }
   function roomProgress(chat){
-    const r=byChat(chat);
+    const r=one("SELECT q.* FROM match_requests q JOIN generated_rooms g ON g.code=q.room_code WHERE g.chat=? AND q.status='finished' ORDER BY q.updated DESC LIMIT 1",chat);
     if(!r)return false;
     const v=votesFor(r.code);
     if(r.status==='finished'&&v?.state==='configuring'){
