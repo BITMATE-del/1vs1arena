@@ -396,6 +396,29 @@ export function createMatchFlow(db, send, roomService, games, modes, rounds, opt
       send(chat,'✏️ 개설자에게 참가금 입력 안내를 개인 메시지로 보냈습니다. 입력 후 이 방에서 상대방의 승인을 받습니다.');return;
     }
   }
+  function roomProgress(chat){
+    const r=byChat(chat);
+    if(!r)return false;
+    const v=votesFor(r.code);
+    if(r.status==='finished'&&v?.state==='configuring'){
+      const draft=one('SELECT * FROM match_rematch_config WHERE code=?',r.code);
+      if(!draft)return false;
+      const phases={choice:'개설자가 변경 여부 선택 중',game:'게임 종목 선택 중',game_both:'게임 종목 선택 중',
+        mode:'경기 방식 선택 중',mode_both:'경기 방식 선택 중',round:'경기 횟수 선택 중',
+        round_both:'경기 횟수 선택 중',stake_choice:'참가금 변경 여부 선택 중',
+        stake_input:'개설자 참가금 입력 대기',confirm:'상대방 최종 승인 대기',started:'경기 시작'};
+      send(chat,'🔁 GLORY ARENA | 추가 경기 준비 현황\n━━━━━━━━━━━━━━\n'+
+        '🎫 '+r.code+'\n🎮 '+draft.game+' · '+(modes[draft.mode]||draft.mode)+' · '+draft.rounds+'판\n'+
+        '💎 1인 '+usdt(draft.stake_micro)+' USDT\n'+
+        '📌 현재 단계: '+(phases[draft.stage]||'확인 중')+'\n'+
+        '⏳ 완료 제한시간: '+Math.max(0,Math.ceil((v.deadline-Date.now())/60000))+'분 남음');
+      return true;
+    }
+    if(r.status==='finished'&&v?.state==='voting'){
+      send(chat,'🔁 추가 경기 여부 확인 중입니다.\n양쪽 참가자가 예/아니오 버튼을 눌러야 다음 단계로 넘어갑니다.');return true;
+    }
+    return false;
+  }
   function closeDecision(r,reason){
     const v=votesFor(r.code);if(!v||!['voting','configuring'].includes(v.state))return;
     const now=Date.now();
@@ -423,5 +446,5 @@ export function createMatchFlow(db, send, roomService, games, modes, rounds, opt
   }
 
   function cancelForAdmin(code){const r=get(code);if(!r||['finished','cancelled','expired'].includes(r.status))return false;run("UPDATE match_requests SET status='cancelled',updated=? WHERE code=?",Date.now(),code);if(r.match_id)run("UPDATE matches SET state='cancelled' WHERE id=? AND state!='finished'",r.match_id);if(r.match_id)options.onMatchEnd?.(r.match_id);send(r.owner,'운영자에 의해 대전이 중단됐습니다: '+code);if(r.guest)send(r.guest,'운영자에 의해 대전이 중단됐습니다: '+code);return true;}
-  return {sendMain,tutorial,begin,lobby,mine,onText,onCallback,tick,finished,cancelForAdmin,forceCloseForAdmin,stopByChat,timeoutMatch,retryCloseForAdmin,closeFinishedForAdmin,resume,get,config,votesFor,stopFor,processClose};
+  return {sendMain,tutorial,begin,lobby,mine,onText,onCallback,tick,finished,roomProgress,cancelForAdmin,forceCloseForAdmin,stopByChat,timeoutMatch,retryCloseForAdmin,closeFinishedForAdmin,resume,get,config,votesFor,stopFor,processClose};
 }
