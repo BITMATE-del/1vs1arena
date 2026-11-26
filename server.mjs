@@ -50,6 +50,19 @@ const moneyEngine=createMoneyEngine(db);
 const pendingWalletInput=new Map();
 
 db.exec("CREATE TABLE IF NOT EXISTS arena_users(id INTEGER PRIMARY KEY, name TEXT NOT NULL, username TEXT NOT NULL DEFAULT '', first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL, blocked INTEGER NOT NULL DEFAULT 0, note TEXT NOT NULL DEFAULT ''); CREATE TABLE IF NOT EXISTS arena_rooms(id INTEGER PRIMARY KEY, title TEXT NOT NULL, last_seen INTEGER NOT NULL, enabled INTEGER NOT NULL DEFAULT 1); CREATE TABLE IF NOT EXISTS admin_audit(id INTEGER PRIMARY KEY, at INTEGER NOT NULL, action TEXT NOT NULL, target TEXT NOT NULL); CREATE TABLE IF NOT EXISTS arena_settings(key TEXT PRIMARY KEY,value TEXT NOT NULL)");
+// Apply user's one-time request to activate all six game modes and funded matchmaking.
+// A durable migration marker ensures later manual admin disable controls remain respected.
+if(!one("SELECT value FROM arena_settings WHERE key='activation_20261126_funded_matches'")){
+ db.exec('SAVEPOINT activate_games_once');
+ try{
+  for(const g of Object.keys(games))run("INSERT INTO arena_settings(key,value) VALUES(?, '1') ON CONFLICT(key) DO UPDATE SET value='1'",'game:'+g);
+  run("INSERT INTO arena_settings(key,value) VALUES('matches_enabled','1') ON CONFLICT(key) DO UPDATE SET value='1'");
+  run("INSERT INTO arena_settings(key,value) VALUES('paid_matches_enabled','1') ON CONFLICT(key) DO UPDATE SET value='1'");
+  run("INSERT INTO arena_settings(key,value) VALUES('activation_20261126_funded_matches','1')");
+  run('INSERT INTO admin_audit(at,action,target) VALUES(?,?,?)',Date.now(),'activate_games_paid_once','6 official games + free match + funded match');
+  db.exec('RELEASE activate_games_once');
+ }catch(e){db.exec('ROLLBACK TO activate_games_once');db.exec('RELEASE activate_games_once');throw e;}
+}
 function setting(k,fallback=''){return one('SELECT value FROM arena_settings WHERE key=?',k)?.value??fallback;}
 function track(u){const m=u.message||u.callback_query?.message, p=u.callback_query?.from||u.message?.from;
 if(p&&!p.is_bot&&Number.isSafeInteger(p.id))run("INSERT INTO arena_users(id,name,username,first_seen,last_seen) VALUES(?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,username=excluded.username,last_seen=excluded.last_seen",p.id,[p.first_name,p.last_name].filter(Boolean).join(' ').slice(0,200),String(p.username||'').slice(0,100),Date.now(),Date.now());
