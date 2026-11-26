@@ -290,7 +290,7 @@ export function createMatchFlow(db, send, roomService, games, modes, rounds, opt
     if(now.owner_vote==='yes'&&now.guest_vote==='yes'){
       run("UPDATE match_continue_votes SET state='configuring',deadline=?,updated=? WHERE code=? AND state='voting'",Date.now()+10*60000,Date.now(),code);
       run("INSERT INTO match_rematch_config(code,game,mode,rounds,stake_micro,stage,updated) VALUES(?,?,?,?,?,'choice',?) ON CONFLICT(code) DO UPDATE SET game=excluded.game,mode=excluded.mode,rounds=excluded.rounds,stake_micro=excluded.stake_micro,stage='choice',updated=excluded.updated",code,r.game,r.mode,r.rounds,r.stake_micro,Date.now());
-      send(chat,'✅ 양쪽 모두 계속하기를 선택했습니다.\n\n🎮 게임 종목과 💎 참가금을 변경하시겠습니까?\n기존 조건: '+r.game+' '+modes[r.mode]+' · '+r.rounds+'판 / 1인 '+usdt(r.stake_micro)+' USDT\n\n개설자 '+name(r.owner)+' 님이 선택한 뒤 상대방이 최종 확인합니다.',[[btn('✅ 기존 조건 그대로','mf:rematch:'+code+':same')],[btn('⚙️ 종목·금액 변경','mf:rematch:'+code+':change')],[btn('❌ 재대결 취소','mf:rematch:'+code+':cancel')]]);
+      send(chat,'✅ 양쪽 모두 계속하기를 선택했습니다.\n\n🎮 게임 종목과 💎 참가금을 변경하시겠습니까?\n기존 조건: '+r.game+' '+modes[r.mode]+' · '+r.rounds+'판 / 1인 '+usdt(r.stake_micro)+' USDT\n\n개설자 '+name(r.owner)+' 님이 선택한 뒤 상대방이 최종 확인합니다.',[[btn('✅ 기존 조건 그대로','mf:rematch:'+code+':same')],[btn('🎮 게임 변경','mf:rematch:'+code+':game_only'),btn('💎 금액 변경','mf:rematch:'+code+':stake_only')],[btn('⚙️ 게임·금액 모두 변경','mf:rematch:'+code+':change')],[btn('❌ 재대결 취소','mf:rematch:'+code+':cancel')]]);
       return;
     }
     closeDecision(r,'declined');
@@ -357,24 +357,33 @@ export function createMatchFlow(db, send, roomService, games, modes, rounds, opt
       run("UPDATE match_rematch_config SET stage='confirm',updated=? WHERE code=?",Date.now(),code);
       sendRematchConfirm(r,chat);return;
     }
-    if(action==='change'&&['choice','confirm','game','mode','round','stake_choice','stake_input'].includes(draft.stage)){
-      run("UPDATE match_rematch_config SET stage='game',updated=? WHERE code=?",Date.now(),code);
+    if(['change','game_only','stake_only'].includes(action)&&
+      ['choice','confirm','game','game_both','mode','mode_both','round','round_both','stake_choice','stake_input'].includes(draft.stage)){
       run("DELETE FROM match_inputs WHERE user_id=? AND kind=?",user,'rematch_stake:'+code);
+      if(action==='stake_only'){
+        run("UPDATE match_rematch_config SET stage='stake_choice',game=?,mode=?,rounds=?,stake_micro=?,updated=? WHERE code=?",r.game,r.mode,r.rounds,r.stake_micro,Date.now(),code);
+        send(chat,'💎 추가 경기 참가금을 변경하시겠습니까?\n기존 1인 '+usdt(r.stake_micro)+' USDT',[[btn('✅ 기존 금액 유지','mf:rematch:'+code+':stake_same')],[btn('✏️ 새 금액 입력','mf:rematch:'+code+':stake_change')]]);
+        return;
+      }
+      run("UPDATE match_rematch_config SET stage=?,stake_micro=?,updated=? WHERE code=?",action==='change'?'game_both':'game',r.stake_micro,Date.now(),code);
       send(chat,'🎮 추가 경기 종목을 선택해 주세요. (개설자 '+name(user)+')',
         Object.keys(games).filter(g=>options.gameEnabled?.(g)!==false).map(g=>[btn(g+' '+games[g][0],'mf:rematch:'+code+':game:'+g)]));
       return;
     }
-    if(action==='game'&&draft.stage==='game'&&games[value]&&options.gameEnabled?.(value)!==false){
-      run("UPDATE match_rematch_config SET game=?,stage='mode',updated=? WHERE code=?",value,Date.now(),code);
+    if(action==='game'&&['game','game_both'].includes(draft.stage)&&games[value]&&options.gameEnabled?.(value)!==false){
+      run("UPDATE match_rematch_config SET game=?,stage=?,updated=? WHERE code=?",value,draft.stage==='game_both'?'mode_both':'mode',Date.now(),code);
       send(chat,'🏅 경기 방식을 선택해 주세요.',Object.entries(modes).filter(([m])=>value==='🎲'||!isSpecialMode(m)).map(([k,v])=>[btn(v,'mf:rematch:'+code+':mode:'+k)]));return;
     }
-    if(action==='mode'&&draft.stage==='mode'&&modes[value]&&(!isSpecialMode(value)||draft.game==='🎲')){
-      run("UPDATE match_rematch_config SET mode=?,stage='round',updated=? WHERE code=?",value,Date.now(),code);
+    if(action==='mode'&&['mode','mode_both'].includes(draft.stage)&&modes[value]&&(!isSpecialMode(value)||draft.game==='🎲')){
+      run("UPDATE match_rematch_config SET mode=?,stage=?,updated=? WHERE code=?",value,draft.stage==='mode_both'?'round_both':'round',Date.now(),code);
       send(chat,'📍 몇 판으로 진행하시겠습니까?', [rounds.map(n=>btn(n+'판','mf:rematch:'+code+':round:'+n))]);return;
     }
-    if(action==='round'&&draft.stage==='round'&&rounds.includes(Number(value))){
-      run("UPDATE match_rematch_config SET rounds=?,stage='stake_choice',updated=? WHERE code=?",Number(value),Date.now(),code);
-      send(chat,'💎 참가금도 변경하시겠습니까?\n현재 1인 '+usdt(r.stake_micro)+' USDT',[[btn('✅ 기존 금액 유지','mf:rematch:'+code+':stake_same')],[btn('✏️ 금액 변경','mf:rematch:'+code+':stake_change')]]);return;
+    if(action==='round'&&['round','round_both'].includes(draft.stage)&&rounds.includes(Number(value))){
+      const withStake=draft.stage==='round_both';
+      run("UPDATE match_rematch_config SET rounds=?,stage=?,updated=? WHERE code=?",Number(value),withStake?'stake_choice':'confirm',Date.now(),code);
+      if(withStake)send(chat,'💎 참가금도 변경하시겠습니까?\n현재 1인 '+usdt(r.stake_micro)+' USDT',[[btn('✅ 기존 금액 유지','mf:rematch:'+code+':stake_same')],[btn('✏️ 금액 변경','mf:rematch:'+code+':stake_change')]]);
+      else sendRematchConfirm(r,chat);
+      return;
     }
     if(action==='stake_same'&&draft.stage==='stake_choice'){
       run("UPDATE match_rematch_config SET stake_micro=?,stage='confirm',updated=? WHERE code=?",r.stake_micro,Date.now(),code);
