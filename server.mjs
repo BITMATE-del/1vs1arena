@@ -11,6 +11,7 @@ import {classicRound} from './classic-rules.mjs';
 import {resultForMatch,managedRoomStatus} from './admin-results.mjs';
 import {createTronDeposits,usdtDisplay} from './tron-deposits.mjs';
 import {createSharedWallet} from './shared-wallet.mjs';
+import {createBotAdmin} from './bot-admin.mjs';
 import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
@@ -38,7 +39,8 @@ const run=(sql,...args)=>db.prepare(sql).run(...args);
 const button=(text,callback_data)=>({text,callback_data});
 const specialDice=createSpecialDiceEngine(db);
 const tronDeposits=createTronDeposits(db,(user,message)=>send(user,message));
-const sharedWallet=createSharedWallet(db,(user,message)=>send(user,message));
+const botAdmin=createBotAdmin(db,enqueue);
+const sharedWallet=createSharedWallet(db,(user,message)=>send(user,message),{onEvent:event=>botAdmin.notify(event)});
 const pendingWalletInput=new Map();
 
 db.exec("CREATE TABLE IF NOT EXISTS arena_users(id INTEGER PRIMARY KEY, name TEXT NOT NULL, username TEXT NOT NULL DEFAULT '', first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL, blocked INTEGER NOT NULL DEFAULT 0, note TEXT NOT NULL DEFAULT ''); CREATE TABLE IF NOT EXISTS arena_rooms(id INTEGER PRIMARY KEY, title TEXT NOT NULL, last_seen INTEGER NOT NULL, enabled INTEGER NOT NULL DEFAULT 1); CREATE TABLE IF NOT EXISTS admin_audit(id INTEGER PRIMARY KEY, at INTEGER NOT NULL, action TEXT NOT NULL, target TEXT NOT NULL); CREATE TABLE IF NOT EXISTS arena_settings(key TEXT PRIMARY KEY,value TEXT NOT NULL)");
@@ -185,6 +187,7 @@ if(p[0]==='wallet'){walletMenu(cid,user);return;}
 if(p[0]==='wallet_history'){walletHistory(cid,user);return;}
 if(p[0]==='wallet_invoice'){walletInvoice(cid,user);return;}
 if(p[0]==='wallet_withdraw'){walletWithdraw(cid,user);return;}
+if(p[0]==='botadmin'){if(botAdmin.isAdmin(user)&&cid===user)send(user,botAdmin.inbox(user),[[button('🔄 관리자 새로고침','botadmin')]]);else enqueue('answerCallbackQuery',{callback_query_id:q.id,text:'관리자 권한이 없습니다.',show_alert:true});return;}
 if(p[0]==='guide'){guide(cid);return;}
 if(chat.type==='private'){if(p[0]==='choose'){matchFlow.begin(user);return;}if(p[0]==='lobby'){matchFlow.lobby(user);return;}groupLink(cid);return;}
 if(p[0]==='lobby'){lobby(cid);return;}
@@ -196,6 +199,10 @@ if(['join','accept','reject','cancel'].includes(p[0])&&/^\d+$/.test(p[1]||'')){a
 const m=u.message;if(!m?.from||!['private','group','supergroup'].includes(m.chat?.type))return;
 if(setWelcome(m))return;
 const cid=m.chat.id,t=(m.text||'').split(/\s+/)[0].split('@')[0],full=m.text||'';
+if(m.chat.type==='private'&&['/admin','/adminpanel','/ops'].includes(t)){
+ if(!botAdmin.isAdmin(m.from.id)){send(cid,'관리자 권한이 없습니다. 웹 관리자에서 텔레그램 사용자 ID를 등록해야 합니다.');return;}
+ send(cid,botAdmin.inbox(m.from.id),[[button('🔄 관리자 새로고침','botadmin')]]);return;
+}
 if(['/start','/help'].includes(t)||full==='🏠 메인 메뉴'){if(m.chat.type==='private')pendingWalletInput.delete(m.from.id);if(m.chat.type!=='private'&&roomService.isGeneratedChat(cid)){send(cid,'⚜️ 이 그룹은 GLORY ARENA 전용 대전방입니다. 경기 진행 안내는 위 공지에서 확인해 주세요.');return;}menu(cid);return;}
 if(full==='📖 이용 안내'){matchFlow.tutorial(cid);return;}
 if(m.chat.type==='private'&&['/wallet','/deposit','/balance'].includes(t)){walletMenu(cid,m.from.id);return;}
@@ -246,7 +253,7 @@ if(path==='/admin/login'&&req.method==='POST'){const ip=String(req.headers['x-re
 if(path==='/admin/logout'&&req.method==='POST'){res.writeHead(303,{'location':'/admin','set-cookie':'ga_admin=; Path=/admin; HttpOnly; Secure; SameSite=Strict; Max-Age=0'}).end();return true;}
 
 if(!adminAuth(req)){if(req.method!=='GET'){res.writeHead(403).end();return true;}adminPage(res,'<section class="login"><h1>GLORY ARENA</h1><p>관리자 전용 로그인</p><form method="post" action="/admin/login"><label>관리자 비밀번호<input type="password" name="password" required autocomplete="current-password"></label><button>로그인</button></form></section>');return true;}
-const sections={overview:'대시보드',users:'회원 관리',rooms:'방 관리',matches:'경기 관리',records:'판정 기록',games:'게임 설정',telegram:'텔레그램 계정 관리',requests:'대전 신청 관리',operations:'운영 안정성',deposits:'USDT 자동 입금',bot:'봇 설정',audit:'운영 로그'};
+const sections={overview:'대시보드',users:'회원 관리',rooms:'방 관리',matches:'경기 관리',records:'판정 기록',games:'게임 설정',telegram:'텔레그램 계정 관리',requests:'대전 신청 관리',operations:'운영 안정성',deposits:'USDT 자동 입금',bot_admin:'봇 관리자',bot:'봇 설정',audit:'운영 로그'};
 const url=new URL(req.url,base);
 const tab=Object.hasOwn(sections,url.searchParams.get('tab'))?url.searchParams.get('tab'):'overview';
 const csrf=createHash('sha256').update(secret+':csrf:'+String(req.headers.cookie||'')).digest('hex');
@@ -257,6 +264,21 @@ let raw='';for await(const chunk of req){raw+=chunk.toString();if(raw.length>120
 const q=new URLSearchParams(raw),provided=q.get('csrf')||'';
 if(!/^[a-f0-9]{64}$/.test(provided)||!timingSafeEqual(Buffer.from(provided),Buffer.from(csrf))){res.writeHead(403).end();return true;}
 const act=q.get('action'),id=Number(q.get('id')),value=q.get('value')||'';let changed=false;
+if(act==='bot_admin_add'||act==='bot_admin_remove'){
+ const user=Number(q.get('admin_user_id'));
+ const result=botAdmin.setAdmin(user,act==='bot_admin_add');
+ if(result){
+   run('INSERT INTO admin_audit(at,action,target) VALUES(?,?,?)',Date.now(),act,String(user));
+   if(act==='bot_admin_add')send(user,'🛡 GLORY ARENA 봇 관리자 등록 완료\n\n이 채팅에서 /admin 명령어로 입출금 현황을 확인할 수 있습니다. 충전 및 출금 신청 알림이 이곳으로 전달됩니다.\n\n송금 승인 및 지갑 변경 권한은 제공되지 않습니다.');
+ }
+ res.writeHead(303,{location:'/admin?tab=bot_admin&saved='+Number(result)}).end();void drain();return true;
+}
+if(act==='bot_admin_test'){
+ const user=Number(q.get('admin_user_id'));
+ const result=botAdmin.isAdmin(user);
+ if(result)send(user,'🔔 GLORY ARENA 봇 관리자 알림 테스트\n이 메시지가 보이면 관리자로 등록된 개인 채팅에 정상 발송 중입니다.');
+ res.writeHead(303,{location:'/admin?tab=bot_admin&saved='+Number(result)}).end();void drain();return true;
+}
 if(act==='treasury_set'){
  const addr=(q.get('treasury_address')||'').trim();
  const result=sharedWallet.setAddress(addr);
@@ -394,6 +416,13 @@ content='<section><h2>대전 신청 현황</h2><p>상대 확인, 신청 수락, 
 '<section><h2>대전 자동 진행 설정</h2><p>신청 수락 대기 시간(5~120분)</p>'+form('flow_minutes','', '<input type="number" name="value" min="5" max="120" value="'+esc(matchFlow.config('request_minutes','60'))+'">','저장')+'</section>'+
 '<section><h2>이용 안내 문구</h2>'+form('flow_guide','', '<textarea name="value" rows="9" maxlength="1800" required>'+esc(matchFlow.config('text_guide','📖 GLORY ARENA 이용 안내\n1. 상대를 지정하거나 대기실에서 신청\n2. 상대방 수락\n3. 전용 비공개 그룹 생성\n4. 양측 준비 완료\n5. 공식 이모지 게임으로 대전\n모든 대전은 무료입니다.'))+'</textarea>','문구 저장')+'</section>'+
 '<section><h2>전용 그룹 공지 문구</h2>'+form('flow_room_notice','', '<textarea name="value" rows="9" maxlength="1800" required>'+esc(matchFlow.config('text_room_notice','📌 GLORY ARENA 경기 안내\n\n두 참가자 모두 공지를 확인하고 준비 완료를 눌러주세요.\n모든 대전은 무료입니다.'))+'</textarea>','문구 저장')+'</section>';
+}
+if(tab==='bot_admin'){
+const admins=botAdmin.list(),rows=all("SELECT n.key,n.admin_id,n.created,u.username FROM bot_admin_notice n LEFT JOIN arena_users u ON u.id=n.admin_id ORDER BY n.created DESC LIMIT 50");
+content='<section><h2>텔레그램 봇 관리자 등록</h2><p>등록된 관리자에게 입금 신청, 자동 충전 완료, 미확인 입금, 출금 신청 및 취소 알림을 개인 채팅으로 전달합니다. 운영자 계정은 먼저 @'+esc(username)+' 봇에서 /start를 누르고, 웹 회원 관리 목록에 표시된 숫자 ID로 등록하세요. 아이디(@username)만으로는 등록되지 않습니다.</p>'+
+form('bot_admin_add','', '<input name="admin_user_id" type="number" min="1" placeholder="관리자 텔레그램 숫자 ID" required>','봇 관리자 등록')+'</section>'+
+'<section><h2>관리자 계정 현황</h2>'+table(['텔레그램 ID','이름','아이디','등록 시각','상태','관리'],admins.map(a=>tr([a.user_id,a.name||'-',a.username?'@'+a.username:'-',date(a.added),a.enabled?'활성':'해제'],'<td>'+(a.enabled?form('bot_admin_test','', '<input type="hidden" name="admin_user_id" value="'+a.user_id+'">','알림 테스트')+form('bot_admin_remove','', '<input type="hidden" name="admin_user_id" value="'+a.user_id+'">','권한 해제'):form('bot_admin_add','', '<input type="hidden" name="admin_user_id" value="'+a.user_id+'">','재등록'))+'</td>')))+'</section>'+
+'<section><h2>발송 대기열 등록 기록</h2><p>중복 발송을 방지하기 위해 이벤트와 관리자의 조합으로 1회만 대기열에 추가합니다. 실제 텔레그램 전달 성공 여부는 별도로 확인해야 합니다.</p>'+table(['이벤트','관리자','대기열 등록 시각'],rows.map(r=>tr([r.key,r.username?'@'+r.username:r.admin_id,date(r.created)])))+'</section>';
 }
 if(tab==='deposits'){
 const fixed=sharedWallet.status(),invoices=all('SELECT i.*,u.username FROM treasury_invoices i LEFT JOIN arena_users u ON u.id=i.user_id ORDER BY i.id DESC LIMIT 75'),requests=all('SELECT * FROM treasury_withdrawals ORDER BY id DESC LIMIT 75'),unmatched=all('SELECT * FROM treasury_unmatched ORDER BY detected DESC LIMIT 50');
