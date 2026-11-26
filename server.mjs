@@ -108,7 +108,7 @@ db.exec('CREATE TABLE IF NOT EXISTS welcome_banner_tokens(hash TEXT PRIMARY KEY,
 const welcomeSetupHash='f27a916bb327294d267c9cf51a30a058c19be78304a25309a0ae278c63ab20f5';
 function menu(chat){
 const photo=one("SELECT value FROM welcome_settings WHERE key='photo'")?.value||process.env.WELCOME_PHOTO_FILE_ID;
-const buttons=[[button('🎯 상대 지정 대결','mf:begin'),button('⏳ 매치 대기 등록','mf:public')],[button('🏛 공개 매치 대기실','mf:lobby'),button('🎮 내 경기','mf:mine')],[button('💎 USDT 지갑','wallet'),button('📊 내 전적','stats')],[button('📖 이용 안내','mf:help')]];
+const buttons=[[button('🎯 상대 지정 대결','mf:begin'),button('⏳ 매치 대기 등록','mf:public')],[button('🏛 공개 매치 대기실','mf:lobby'),button('🎮 내 경기','mf:mine')],[button('💎 USDT 지갑','wallet'),button('📊 내 전적','stats')],[button('📖 이용 안내','mf:help'),{text:'📞 고객센터',url:'https://t.me/Glory_offical'}]];
 if(botAdmin.isAdmin(chat))buttons.push([button('🛡 관리자 메뉴','ba:home')]);
 const caption=setting('welcome_caption','⚜️ GLORY ARENA\n━━━━━━━━━━━━━━\n승부의 끝, 영광의 시작.\n\n당신의 다음 승부를 시작하세요.\n매치를 개설하거나 대기실에서 상대를 만나보세요.\n\n1vs1 무료·USDT 대전 · 텔레그램 공식 게임');
 if(photo)enqueue('sendPhoto',{chat_id:chat,photo,caption,reply_markup:{inline_keyboard:buttons}});
