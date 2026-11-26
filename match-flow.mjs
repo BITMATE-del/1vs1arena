@@ -87,7 +87,7 @@ export function createMatchFlow(db, send, roomService, games, modes, rounds, opt
   function groupReady(code,room){const r=get(code);if(!r||r.status!=='room_pending'||!room?.chat||!room?.linkOwner||!room?.linkGuest)return;
     const id=Number(run("INSERT INTO matches(chat,owner,guest,game,mode,rounds,state) VALUES(?,?,?,?,?,?,'waiting')",room.chat,r.owner,r.guest,r.game,r.mode,r.rounds).lastInsertRowid);
     run("UPDATE match_requests SET status='room_ready',room_code=COALESCE(room_code,?),match_id=?,updated=? WHERE code=?",room.code,id,Date.now(),code);
-    send(room.chat,text('room_notice','📌 GLORY ARENA 경기 안내\n\n양측 모두 공지 확인 후 준비 완료를 눌러주세요.\n승패는 공식 텔레그램 이모지 결과로 기록됩니다.')+'\n\n매치: '+code+'\n'+r.game+' '+r.rounds+'판\n'+stakeLabel(r),[[btn('✅ 공지 확인','mf:notice:'+code)],[btn('🎮 준비 완료','mf:ready:'+code)],[btn('🛑 중도 종료 요청','mf:stop:'+code)]]);
+    send(room.chat,text('room_notice','📌 GLORY ARENA 경기 안내\n\n양측 모두 공지 확인 후 준비 완료를 눌러주세요.\n승패는 공식 텔레그램 이모지 결과로 기록됩니다.')+'\n\n매치: '+code+'\n'+r.game+' '+r.rounds+'판\n'+stakeLabel(r),[[btn('✅ 공지 확인','mf:notice:'+code)],[btn('🎮 준비 완료','mf:ready:'+code)],[btn('🛑 중도 종료 요청','mf:stop:'+code)],[btn('📣 관리자 호출','admincall')]]);
     send(r.owner,'🚪 '+code+' 전용 그룹 입장 링크입니다.\n진행 안내와 공지 확인은 그룹 안에서 이루어집니다.',[[{text:'🚪 그룹 입장',url:room.linkOwner}]]);
     send(r.guest,'🚪 '+code+' 전용 그룹 입장 링크입니다.\n진행 안내와 공지 확인은 그룹 안에서 이루어집니다.',[[{text:'🚪 그룹 입장',url:room.linkGuest}]]);
   }
