@@ -29,6 +29,8 @@ const messages=db.prepare('SELECT payload FROM outbox ORDER BY id').all().map(r=
 assert(messages.every(x=>x.chat_id===101||x.chat_id===102));
 assert(messages.some(x=>x.text.includes('TXID: '+('a'.repeat(64)))));
 assert(messages.some(x=>x.text.includes('송금 미실행')));
+assert(messages.filter(x=>x.text.includes('출금 신청 접수')).every(x=>x.reply_markup?.inline_keyboard?.[0]?.some(b=>b.callback_data==='wo:approve:9')),'withdrawal notice has approve callback');
+assert(messages.filter(x=>x.text.includes('출금 신청 접수')).every(x=>x.reply_markup?.inline_keyboard?.[0]?.some(b=>b.callback_data==='wo:reject:9')),'withdrawal notice has reject callback');
 assert(admins.setAdmin(102,false),'admin access can be revoked');
 assert.equal(admins.isAdmin(102),false);
 assert.equal(admins.notify({type:'invoice',key:'invoice:8',user:103,amount:2000000}),1,'disabled administrator receives no new events');
