@@ -307,7 +307,7 @@ if(m.chat.type==='private'&&one("SELECT 1 FROM match_inputs WHERE user_id=? AND 
 if(m.chat.type==='private'&&botOperations.onText(m.from.id,cid,m.chat.type,full))return;
 if(m.chat.type==='private'&&handleWalletInput(cid,m.from.id,full))return;
 if(m.chat.type==='private'&&matchFlow.onText(m.from.id,full))return;
-if(m.chat.type!=='private'&&['/resume','/status'].includes(t)){const current=one("SELECT id FROM matches WHERE chat=? AND state='active' ORDER BY id DESC LIMIT 1",cid);if(current)matchBoard.queueMatch(current.id);else send(cid,'현재 진행 중인 경기가 없습니다.');void drain();return;}
+if(m.chat.type!=='private'&&['/resume','/status'].includes(t)){const current=one("SELECT id FROM matches WHERE chat=? AND state='active' ORDER BY id DESC LIMIT 1",cid);if(current)matchBoard.queueMatch(current.id);else if(!matchFlow.roomProgress(cid))send(cid,'현재 진행 중인 경기가 없습니다.');void drain();return;}
 if(m.chat.type!=='private'&&['/end','/stop','/close'].includes(t)){matchFlow.stopByChat(m.from.id,cid);return;}
 if(m.chat.type!=='private'&&!m.dice&&gameEmoji(full)){const active=one("SELECT * FROM matches WHERE chat=? AND state='active' ORDER BY id DESC LIMIT 1",cid);if(active&&active.turn===m.from.id){send(cid,'⚠️ '+gameEmoji(full)+'가 일반 텍스트로 전송되어 점수가 기록되지 않았습니다.\n공식 게임 애니메이션으로 전송해야 합니다.\n\n'+gameInstructions(active.game));}return;}
 if(m.chat.type!=='private'&&['/play','/game','/roll'].includes(t)){const active=one("SELECT * FROM matches WHERE chat=? AND state='active' ORDER BY id DESC LIMIT 1",cid);if(active)send(cid,'🔴 현재 차례: '+matchBoard.player(active.turn)+'\n\n'+gameInstructions(active.game));return;}
