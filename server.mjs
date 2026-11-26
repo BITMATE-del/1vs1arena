@@ -36,6 +36,12 @@ const db=new DatabaseSync(dbPath);
 db.exec("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000");
 db.exec('CREATE TABLE IF NOT EXISTS matches(id INTEGER PRIMARY KEY, chat INTEGER NOT NULL, owner INTEGER NOT NULL, guest INTEGER, game TEXT NOT NULL, mode TEXT NOT NULL, rounds INTEGER NOT NULL, state TEXT NOT NULL DEFAULT "waiting", turn INTEGER, round INTEGER NOT NULL DEFAULT 1, a INTEGER NOT NULL DEFAULT 0, b INTEGER NOT NULL DEFAULT 0)'.replace('DEFAULT "waiting"', "DEFAULT 'waiting'"));
 db.exec('CREATE TABLE IF NOT EXISTS rolls(chat INTEGER, message INTEGER, match INTEGER, round INTEGER, player INTEGER, value INTEGER, PRIMARY KEY(chat,message), UNIQUE(match,round,player)); CREATE TABLE IF NOT EXISTS updates(id INTEGER PRIMARY KEY); CREATE TABLE IF NOT EXISTS outbox(id INTEGER PRIMARY KEY, method TEXT NOT NULL, payload TEXT NOT NULL)');
+
+db.exec("CREATE TABLE IF NOT EXISTS match_notice_events(event_key TEXT PRIMARY KEY,match_id INTEGER NOT NULL,chat INTEGER NOT NULL,text TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'queued',attempts INTEGER NOT NULL DEFAULT 0,last_error TEXT,created INTEGER NOT NULL,delivered INTEGER);CREATE TABLE IF NOT EXISTS match_notice_settings(id INTEGER PRIMARY KEY CHECK(id=1),cutoff_match_id INTEGER NOT NULL)");
+try{db.exec("ALTER TABLE outbox ADD COLUMN notification_key TEXT");}catch(e){if(!String(e.message).includes('duplicate column name'))throw e;}
+db.exec("CREATE UNIQUE INDEX IF NOT EXISTS outbox_notification_key_unique ON outbox(notification_key)");
+db.prepare("INSERT OR IGNORE INTO match_notice_settings(id,cutoff_match_id) VALUES(1,COALESCE((SELECT MAX(id) FROM matches),0))").run();
+
 const games={'🎲':['다이스',6],'🏀':['농구',5],'⚽':['축구',5],'🎯':['다트',6],'🎳':['볼링',6],'🎰':['슬롯',64]};
 const modes={wins:'선승제',total:'점수 합산',round:'매판 승패',...SPECIAL_MODES};
 const rounds=[1,3,5,7,9];
@@ -84,6 +90,18 @@ if(m.turn!==user){send(chat,'현재 차례는 '+current+' 님입니다. 본인 �
 send(chat,'👤 지금은 '+current+' 님 차례입니다.\n\n'+gameInstructions(m.game));
 }
 function enqueue(method,payload){run('INSERT INTO outbox(method,payload) VALUES(?,?)',method,JSON.stringify(payload));}
+function criticalNotice(matchId,chat,key,message){
+  const eventKey='match:'+matchId+':'+key;
+  run("INSERT OR IGNORE INTO match_notice_events(event_key,match_id,chat,text,status,created) VALUES(?,?,?,?,'queued',?)",eventKey,matchId,chat,message,Date.now());
+  const event=one("SELECT status,chat,text FROM match_notice_events WHERE event_key=?",eventKey);
+  if(event?.status==='queued')run("INSERT OR IGNORE INTO outbox(method,payload,notification_key) VALUES('sendMessage',?,?)",JSON.stringify({chat_id:event.chat,text:event.text}),eventKey);
+}
+function repairNoticeQueue(){
+  // Outbox entries and event records can be restored after an interrupted operation.
+  for(const e of all("SELECT event_key,chat,text FROM match_notice_events WHERE status='queued' ORDER BY created LIMIT 50"))
+    run("INSERT OR IGNORE INTO outbox(method,payload,notification_key) VALUES('sendMessage',?,?)",JSON.stringify({chat_id:e.chat,text:e.text}),e.event_key);
+}
+
 function send(chat,text,buttons){enqueue('sendMessage',{chat_id:chat,text,...(buttons?{reply_markup:{inline_keyboard:buttons}}:{})});}
 db.exec('CREATE TABLE IF NOT EXISTS welcome_settings(key TEXT PRIMARY KEY,value TEXT NOT NULL)');
 db.exec('CREATE TABLE IF NOT EXISTS welcome_banner_tokens(hash TEXT PRIMARY KEY,expires INTEGER NOT NULL)');
@@ -306,8 +324,8 @@ let result;try{result=await response.json();}catch{result={};}
 if(!response.ok||!result.ok){const code=Number(result.error_code||response.status);if(code===429){const retry=Math.max(Number(result.parameters?.retry_after)||0,Number(response.headers.get('retry-after'))||0,120);blockedUntil=Date.now()+(retry+5)*1000;console.warn('Telegram',method,'HTTP 429; retry_after=',retry);}throw Object.assign(new Error('Telegram API error'),{code,description:String(result.description||'')});}
 return result.result;}
 async function register(){for(;;){if(webhookReady)return;try{const me=await tg('getMe',{});if(!me?.id||!me?.username)throw Error('GETME_EMPTY');console.log('Telegram Bot API identity verified: @'+me.username+' (ID '+me.id+')');if(me.id!==botId)throw Error('BOT_TOKEN_ID_MISMATCH');username=me.username;await tg('setWebhook',{url:base+'/telegram/webhook',secret_token:secret,allowed_updates:['message','callback_query'],drop_pending_updates:false,max_connections:1});webhookReady=true;lastError=null;console.log('Telegram webhook registered successfully for @'+username);void drain();return;}catch(e){lastError=e.code||e.cause?.code||e.name||'network';const description=String(e.description||e.cause?.message||e.message||'API_FAILURE').replace(/\d{6,}:[A-Za-z0-9_-]{20,}/g,'[REDACTED_TOKEN]').slice(0,180);console.warn('Telegram API connection failed:',String(lastError).slice(0,60),description);await sleep(e.code===429?Math.max(0,blockedUntil-Date.now()):120000);}}}
-async function drain(){if(busy||!webhookReady)return;busy=true;try{for(;;){const r=one('SELECT * FROM outbox ORDER BY id LIMIT 1');if(!r)break;try{const p=JSON.parse(r.payload);if(r.method==='arenaBoardSync'){await matchBoard.sync(p,tg);}else if(r.method==='sendDice'){/* Remove any leftover bot-generated game jobs from prior deployments; never throw on behalf of a player. */}else await tg(r.method,p);run('DELETE FROM outbox WHERE id=?',r.id);}catch(e){lastError=e.code||'network';console.warn('Delivery',r.method,'failed:',lastError);
-if([400,403].includes(e.code)){if(r.method==='sendPhoto'){const p=JSON.parse(r.payload);enqueue('sendMessage',{chat_id:p.chat_id,text:'GLORY ARENA\n'+p.caption,reply_markup:p.reply_markup});}run('DELETE FROM outbox WHERE id=?',r.id);continue;}await sleep(e.code===429?Math.max(0,blockedUntil-Date.now()):60000);break;}}}finally{busy=false;}}
+async function drain(){if(busy||!webhookReady)return;busy=true;try{for(;;){const r=one('SELECT * FROM outbox ORDER BY id LIMIT 1');if(!r)break;try{const p=JSON.parse(r.payload);if(r.method==='arenaBoardSync'){await matchBoard.sync(p,tg);}else if(r.method==='sendDice'){/* Remove any leftover bot-generated game jobs from prior deployments; never throw on behalf of a player. */}else await tg(r.method,p);if(r.notification_key)run("UPDATE match_notice_events SET status='delivered',delivered=?,attempts=attempts+1,last_error=NULL WHERE event_key=? AND status='queued'",Date.now(),r.notification_key);run('DELETE FROM outbox WHERE id=?',r.id);}catch(e){lastError=e.code||'network';console.warn('Delivery',r.method,'failed:',lastError);
+if([400,403].includes(e.code)){if(r.notification_key){run("UPDATE match_notice_events SET status='failed',attempts=attempts+1,last_error=? WHERE event_key=?",String(e.description||e.message||e.code).slice(0,160),r.notification_key);console.warn('Critical notice delivery failed',{event:r.notification_key,code:e.code});}if(r.method==='sendPhoto'){const p=JSON.parse(r.payload);enqueue('sendMessage',{chat_id:p.chat_id,text:'GLORY ARENA\n'+p.caption,reply_markup:p.reply_markup});}run('DELETE FROM outbox WHERE id=?',r.id);continue;}await sleep(e.code===429?Math.max(0,blockedUntil-Date.now()):60000);break;}}}finally{busy=false;}}
 function validSecret(req){const a=Buffer.from(String(req.headers['x-telegram-bot-api-secret-token']||''));const b=Buffer.from(secret);return a.length===b.length&&timingSafeEqual(a,b);}
 
 const adminPassword=process.env.ADMIN_PASSWORD||'';
@@ -326,9 +344,14 @@ function announceMatchSettlement(id){
   const title='🏆 GLORY ARENA | 챔피언 탄생 🏆\n━━━━━━━━━━━━━━━━\n\n';
   const score='\n\n🎮 '+m.game+' · '+m.rounds+'판\n📊 최종 스코어  A '+m.a+' : '+m.b+' B\n🎫 매치 코드: '+code;
   const escrow=moneyEngine.escrow(id);
+  if(!escrow && (!request || Number(request.stake_micro)!==0)){
+    matchWatch.incident('missing_financial_escrow',id,'종료 경기의 참가금/예치 기록 불일치');
+    criticalNotice(id,m.chat,'missing_escrow','⚠️ GLORY ARENA 경기 정산 확인 필요\n🎫 '+code+'\n유료 경기인지 확인할 참가금·예치 기록이 일치하지 않습니다. 임의로 무료 경기나 지급 완료로 처리하지 않습니다.');
+    return;
+  }
   if(!escrow){
     const headline=m.state==='cancelled'?'🛑 경기가 중단되었습니다.':winnerId?'🎉 '+label(winnerId)+' 님, 승리를 축하드립니다!':'🤝 치열한 승부 끝에 무승부로 종료되었습니다.';
-    send(m.chat,title+headline+score+
+    criticalNotice(id,m.chat,'free_result',title+headline+score+
       '\n\n💎 베팅금액: 0 USDT (무료 대전)'+
       '\n💰 총 정산금액: 0 USDT'+
       '\n📈 최종 수익: 0 USDT'+
@@ -340,12 +363,11 @@ function announceMatchSettlement(id){
   catch(e){console.error('Arena settlement pending',{match:id,reason:String(e?.message||e).slice(0,120)});}
   const record=one('SELECT * FROM money_settlements WHERE match_id=?',id);
   if(!settled?.ok||!record){
-    send(m.chat,'🏆 GLORY ARENA | 경기 종료\n━━━━━━━━━━━━━━━━\n'+
+    criticalNotice(id,m.chat,'settlement_pending','🏆 GLORY ARENA | 경기 종료\n━━━━━━━━━━━━━━━━\n'+
       '최종 점수 A '+m.a+' : '+m.b+' B\n매치 코드: '+code+
       '\n\n⚠️ USDT 정산 확인 중입니다.\n정산 원장에 지급 기록이 확인되기 전에는 지급 완료로 안내하지 않습니다.');
     return;
   }
-  if(settled.reused)return;
   const stakeA=BigInt(escrow.stake_a),stakeB=BigInt(escrow.stake_b),pool=stakeA+stakeB;
   const fmt=n=>usdtDisplay(Number(n))+' USDT';
   let announcement='';
@@ -371,7 +393,7 @@ function announceMatchSettlement(id){
       '\n🥈 상대 참가자: '+label(loser)+
       '\n패배 참가금: '+fmt(loser===m.owner?stakeA:stakeB);
   }
-  send(m.chat,title+announcement+'\n━━━━━━━━━━━━━━━━\n⚜️ 영광의 승부를 축하드립니다!');
+  criticalNotice(id,m.chat,'result',title+announcement+'\n━━━━━━━━━━━━━━━━\n⚜️ 영광의 승부를 축하드립니다!');
   for(const user of [m.owner,m.guest]){
     const balance=moneyEngine.balance(user);
     const paid=record.decision==='winner'&&Number(record.winner)===user;
@@ -379,7 +401,7 @@ function announceMatchSettlement(id){
     const status=record.decision==='refund'?'↩️ 베팅금액 반환: '+fmt(stake):
       paid?'🏆 우승 지급금: '+fmt(BigInt(record.payout_micro))+'\n📈 순수익: +'+fmt(BigInt(record.payout_micro)-stake):
       '🥈 경기 패배 · 베팅금액: '+fmt(stake);
-    send(user,'🏆 GLORY ARENA | 경기 정산서\n━━━━━━━━━━━━━━\n'+
+    criticalNotice(id,user,'personal:'+user,'🏆 GLORY ARENA | 경기 정산서\n━━━━━━━━━━━━━━\n'+
       '🎫 '+code+'\n'+status+
       '\n💳 현재 내부 지갑 잔액: '+fmt(balance)+
       '\n\n입출금 및 경기 정산 내역은 USDT 지갑 메뉴에서 확인하실 수 있습니다.');
@@ -741,6 +763,6 @@ webhookReady=true;console.log('Webhook update accepted',u.update_id);res.writeHe
 }catch(e){console.error('Webhook processing failed',e?.name||'Error',String(e?.message||'unknown').slice(0,180));res.writeHead(500).end();}
 });
 server.listen(port,'0.0.0.0',()=>{console.log('GLORY ARENA HTTP server listening on',port);void register();});
-setInterval(()=>{moneyEngine.reconcile();void drain();void roomService.work();roomService.recover();matchFlow.tick();matchWatch.sync();matchWatch.tick();settlementJournal.reconcile();},5000).unref();
+setInterval(()=>{moneyEngine.reconcile();for(const row of all("SELECT m.id FROM matches m LEFT JOIN match_notice_events n ON n.match_id=m.id AND n.event_key='match:'||m.id||':result' WHERE m.state='finished' AND m.id>(SELECT cutoff_match_id FROM match_notice_settings WHERE id=1) AND n.event_key IS NULL ORDER BY m.id DESC LIMIT 20"))announceMatchSettlement(row.id);repairNoticeQueue();void drain();void roomService.work();roomService.recover();matchFlow.tick();matchWatch.sync();matchWatch.tick();settlementJournal.reconcile();},5000).unref();
 setInterval(()=>{void tronDeposits.poll().then(r=>{if(r.credited)void drain();}).catch(e=>console.warn('TRON watcher:',String(e.message||e).slice(0,90)));void sharedWallet.poll().then(r=>{if(r.credited)void drain();}).catch(e=>console.warn('Treasury watcher:',String(e.message||e).slice(0,90)));},60000).unref();
 setTimeout(()=>{void tronDeposits.poll().then(r=>{if(r.credited)void drain();}).catch(e=>console.warn('TRON watcher startup:',String(e.message||e).slice(0,90)));void sharedWallet.poll().then(r=>{if(r.credited)void drain();}).catch(e=>console.warn('Treasury watcher startup:',String(e.message||e).slice(0,90)));},15000).unref();
