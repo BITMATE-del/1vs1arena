@@ -14,7 +14,7 @@ export function createMatchFlow(db, send, roomService, games, modes, rounds, opt
   try{db.exec("ALTER TABLE match_requests ADD COLUMN stake_micro INTEGER NOT NULL DEFAULT 0");}catch(e){if(!String(e.message).includes('duplicate column name'))throw e;}
   const money=options.money||null;
   const moneyAllowed=()=>options.paidMatchesEnabled?.()===true&&!!money;
-  const usdt=v=>(Number(v)/1000000).toFixed(2).replace(/\\.00$/,'');
+  const usdt=v=>(Number(v)/1000000).toFixed(2).replace(/\.00$/,'');
   const stakeLabel=r=>r.stake_micro>0?'참가금 '+usdt(r.stake_micro)+' USDT / 총 판돈 '+usdt(r.stake_micro*2)+' USDT / 수수료 3%':'무료 대전';
   function offerStake(user,code){
     const r=get(code);if(!r||r.owner!==user||r.status!=='selecting')return;
@@ -113,6 +113,7 @@ export function createMatchFlow(db, send, roomService, games, modes, rounds, opt
     const now=Date.now(),room=r.room_code?roomService.getByCode(r.room_code):null;
     run("UPDATE match_requests SET status='cancelled',updated=? WHERE code=? AND status IN ('room_ready','playing','finished')",now,r.code);
     if(r.match_id)run("UPDATE matches SET state='cancelled',turn=NULL WHERE id=? AND state IN ('active','waiting','requested')",r.match_id);
+    if(r.match_id)options.onMatchEnd?.(r.match_id);
     if(r.match_id&&r.status==='playing')options.onMatchStopped?.(r.match_id);
     run("INSERT INTO match_continue_votes(code,deadline,close_after,state,updated) VALUES(?,?,?,'closing',?) ON CONFLICT(code) DO UPDATE SET close_after=excluded.close_after,state='closing',updated=excluded.updated,last_error=NULL",r.code,now,now+12000,now);
     const who=source==='admin'?'관리자 강제 종료':source==='timeout'?'응답 시간 초과 종료':'양측 합의 종료';
@@ -220,6 +221,7 @@ export function createMatchFlow(db, send, roomService, games, modes, rounds, opt
     const r=byChat(chat);if(!r||r.status!=='playing')return;
     const now=Date.now();
     run("UPDATE match_requests SET status='finished',updated=? WHERE code=?",now,r.code);
+    options.onMatchEnd?.(r.match_id);
     roomService.finish(r.room_code);
     run("INSERT INTO match_continue_votes(code,deadline,state,updated) VALUES(?,?,'voting',?) ON CONFLICT(code) DO UPDATE SET owner_vote=NULL,guest_vote=NULL,deadline=excluded.deadline,close_after=NULL,state='voting',last_error=NULL,updated=excluded.updated",r.code,now+10*60000,now);
     send(chat,finishMsg(r.code),[[btn('✅ 예, 계속하기','mf:again:'+r.code+':yes'),btn('❌ 아니오, 종료','mf:again:'+r.code+':no')]]);
@@ -246,6 +248,8 @@ export function createMatchFlow(db, send, roomService, games, modes, rounds, opt
       }
       const next=Number(run("INSERT INTO matches(chat,owner,guest,game,mode,rounds,state,turn,round,a,b) VALUES(?,?,?,?,?,?,'active',?,1,0,0)",room.chat,r.owner,r.guest,r.game,r.mode,r.rounds,r.owner).lastInsertRowid);
       if(r.stake_micro>0){
+        // The just-finished match must release escrow before a paid rematch can debit again.
+        money.reconcile();
         const held=money.deposit(next,code,r.owner,r.guest,r.stake_micro);
         if(!held.ok){run("UPDATE matches SET state='cancelled' WHERE id=?",next);send(chat,'재대전 참가금 예치에 실패했습니다. 새 매치를 생성해 주세요.');closeDecision(r,'declined');return;}
       }
@@ -283,6 +287,6 @@ export function createMatchFlow(db, send, roomService, games, modes, rounds, opt
     }finally{closingInProgress.delete(code);}
   }
 
-  function cancelForAdmin(code){const r=get(code);if(!r||['finished','cancelled','expired'].includes(r.status))return false;run("UPDATE match_requests SET status='cancelled',updated=? WHERE code=?",Date.now(),code);if(r.match_id)run("UPDATE matches SET state='cancelled' WHERE id=? AND state!='finished'",r.match_id);send(r.owner,'운영자에 의해 대전이 중단됐습니다: '+code);if(r.guest)send(r.guest,'운영자에 의해 대전이 중단됐습니다: '+code);return true;}
+  function cancelForAdmin(code){const r=get(code);if(!r||['finished','cancelled','expired'].includes(r.status))return false;run("UPDATE match_requests SET status='cancelled',updated=? WHERE code=?",Date.now(),code);if(r.match_id)run("UPDATE matches SET state='cancelled' WHERE id=? AND state!='finished'",r.match_id);if(r.match_id)options.onMatchEnd?.(r.match_id);send(r.owner,'운영자에 의해 대전이 중단됐습니다: '+code);if(r.guest)send(r.guest,'운영자에 의해 대전이 중단됐습니다: '+code);return true;}
   return {sendMain,tutorial,begin,lobby,mine,onText,onCallback,tick,finished,cancelForAdmin,forceCloseForAdmin,stopByChat,timeoutMatch,retryCloseForAdmin,closeFinishedForAdmin,resume,get,config,votesFor,stopFor,processClose};
 }
