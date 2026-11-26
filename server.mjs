@@ -10,6 +10,7 @@ import { createMatchWatch } from './match-watch.mjs';
 import {classicRound} from './classic-rules.mjs';
 import {resultForMatch,managedRoomStatus} from './admin-results.mjs';
 import {createTronDeposits,usdtDisplay} from './tron-deposits.mjs';
+import {createSharedWallet} from './shared-wallet.mjs';
 import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
@@ -37,6 +38,8 @@ const run=(sql,...args)=>db.prepare(sql).run(...args);
 const button=(text,callback_data)=>({text,callback_data});
 const specialDice=createSpecialDiceEngine(db);
 const tronDeposits=createTronDeposits(db,(user,message)=>send(user,message));
+const sharedWallet=createSharedWallet(db,(user,message)=>send(user,message));
+const pendingWalletInput=new Map();
 
 db.exec("CREATE TABLE IF NOT EXISTS arena_users(id INTEGER PRIMARY KEY, name TEXT NOT NULL, username TEXT NOT NULL DEFAULT '', first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL, blocked INTEGER NOT NULL DEFAULT 0, note TEXT NOT NULL DEFAULT ''); CREATE TABLE IF NOT EXISTS arena_rooms(id INTEGER PRIMARY KEY, title TEXT NOT NULL, last_seen INTEGER NOT NULL, enabled INTEGER NOT NULL DEFAULT 1); CREATE TABLE IF NOT EXISTS admin_audit(id INTEGER PRIMARY KEY, at INTEGER NOT NULL, action TEXT NOT NULL, target TEXT NOT NULL); CREATE TABLE IF NOT EXISTS arena_settings(key TEXT PRIMARY KEY,value TEXT NOT NULL)");
 function setting(k,fallback=''){return one('SELECT value FROM arena_settings WHERE key=?',k)?.value??fallback;}
@@ -69,21 +72,58 @@ else send(chat,'GLORY ARENA\n'+caption,buttons);
 }
 function walletMenu(chat,user){
  if(chat!==user){send(chat,'지갑 정보는 봇 개인 대화에서 확인해 주세요.');return;}
- const addr=tronDeposits.address(user),balance=usdtDisplay(tronDeposits.balance(user));
- const status=tronDeposits.status();
- const lines=['💎 GLORY ARENA · USDT/TRC20 지갑','', '현재 잔액: '+balance+' USDT',''];
- if(addr){lines.push('전용 입금 주소:',addr.address,'','USDT/TRC20만 전송해 주세요. 다른 체인·토큰은 입금 반영되지 않습니다.');}
- else lines.push('입금 주소가 아직 발급되지 않았습니다. 운영자에게 주소 등록을 요청해 주세요.');
- if(!status.enabled||!status.apiConfigured)lines.push('','⚠️ 자동 입금 반영 대기: 운영자가 TronGrid 연동을 활성화해야 합니다.');
- lines.push('','입금은 체인 확정 후 자동 반영됩니다. 해당 잔액은 현재 게임 참여금으로 사용되지 않습니다.');
- send(chat,lines.join('\n'),[[button('🔄 잔액 새로고침','wallet'),button('📋 충전 내역','wallet_history')],[button('🏠 메인 메뉴','menu')]]);
+ const addr=sharedWallet.treasury(),balance=usdtDisplay(tronDeposits.balance(user)),status=sharedWallet.status();
+ const out=['💎 GLORY ARENA · USDT/TRC20 지갑','','현재 잔액: '+balance+' USDT',''];
+ if(addr)out.push('고정 충전 주소:',addr,'','모든 회원이 같은 주소로 입금합니다. 반드시 먼저 충전 신청을 하여 안내되는 정확한 금액을 보내세요.');
+ else out.push('아직 공용 입금 지갑주소가 설정되지 않았습니다.');
+ if(!status.enabled||!status.apiConfigured)out.push('','⚠️ 자동 충전 확인이 현재 비활성화되어 있습니다.');
+ out.push('','출금은 운영 지갑에서 송금되며, 현재 자동 송금은 연동 전입니다. 출금 신청은 보류 상태로 접수됩니다.');
+ send(chat,out.join('\n'),[[button('➕ USDT 충전 신청','wallet_invoice'),button('📤 출금 신청','wallet_withdraw')],[button('🔄 잔액 새로고침','wallet'),button('📋 입출금 내역','wallet_history')],[button('🏠 메인 메뉴','menu')]]);
 }
 function walletHistory(chat,user){
  if(chat!==user)return;
- const records=tronDeposits.history(user);
- const text=records.length?records.map(r=>'✅ '+usdtDisplay(r.amount_micro)+' USDT\n'+r.txid.slice(0,20)+'…').join('\n\n'):'확인된 USDT 입금 기록이 없습니다.';
- send(chat,'📋 USDT/TRC20 입금 내역\n\n'+text,[[button('💎 내 지갑','wallet')]]);
+ const deposits=tronDeposits.history(user),withdrawals=sharedWallet.mine(user).withdrawals;
+ const ds=deposits.length?deposits.map(r=>'✅ 입금 '+usdtDisplay(r.amount_micro)+' USDT\n'+r.txid.slice(0,20)+'…').join('\n\n'):'입금 기록 없음';
+ const ws=withdrawals.length?withdrawals.map(r=>'📤 #'+r.id+' '+usdtDisplay(r.amount_micro)+' USDT / '+r.status).join('\n'):'출금 신청 없음';
+ send(chat,'📋 USDT 입출금 내역\n\n입금\n'+ds+'\n\n출금\n'+ws,[[button('💎 내 지갑','wallet')]]);
 }
+function walletInvoice(chat,user){
+ if(chat!==user)return;
+ const state=sharedWallet.status();
+ if(!state.address||!state.enabled||!state.apiConfigured){send(chat,'현재 USDT 자동 충전 접수가 준비되지 않았습니다.');return;}
+ const active=sharedWallet.mine(user).invoice;
+ if(active){send(chat,'✅ 입금 신청 확인\n\nTRC20 주소:\n'+active.address+'\n\n정확한 입금액: '+usdtDisplay(active.amount_micro)+' USDT\n\n30분 유효. 금액이 다르면 자동 반영되지 않습니다.',[[button('🔄 지갑 확인','wallet')]]);return;}
+ pendingWalletInput.set(user,{kind:'invoice',at:Date.now()});
+ send(chat,'💎 충전할 금액을 USDT 단위로 입력해 주세요.\n예: 10 또는 25.5\n\n공용 주소를 사용하므로 회원별 구분을 위해 신청 금액에 0.01 USDT 미만의 식별 금액이 더해집니다.\n입력 후 안내되는 최종 정확한 금액으로 전송해야 자동 충전됩니다.',[[button('🏠 메인 메뉴','menu')]]);
+}
+function walletWithdraw(chat,user){
+ if(chat!==user)return;
+ pendingWalletInput.set(user,{kind:'withdraw',at:Date.now()});
+ send(chat,'📤 출금 신청\n\n출금받을 본인 TRON 주소와 금액을 한 줄로 입력하세요.\n예: T로시작하는34자리주소 10\n\n신청 즉시 잔액이 보류 처리됩니다. 현재 자동 온체인 송금은 미연결이며, 운영자가 송금 시스템을 연결하기 전에는 출금 완료되지 않습니다.',[[button('🏠 메인 메뉴','menu')]]);
+}
+function handleWalletInput(chat,user,text){
+ if(chat!==user)return false;
+ const pending=pendingWalletInput.get(user);
+ if(!pending||Date.now()-pending.at>10*60000){pendingWalletInput.delete(user);return false;}
+ if(text.startsWith('/'))return false;
+ pendingWalletInput.delete(user);
+ if(pending.kind==='invoice'){
+   const result=sharedWallet.invoice(user,text.trim());
+   if(!result.ok){send(chat,'충전 신청을 처리하지 못했습니다: '+result.reason);return true;}
+   const v=result.invoice;
+   send(chat,'✅ 충전 신청 접수\n\n공용 USDT/TRC20 주소:\n'+v.address+'\n\n정확한 입금 금액: '+usdtDisplay(v.amount_micro)+' USDT\n\n30분 안에 정확한 수량으로 보내세요. 확정 거래만 자동 반영됩니다. 다른 금액은 관리자 확인 대상입니다.',[[button('🔄 지갑 확인','wallet')]]);
+   return true;
+ }
+ if(pending.kind==='withdraw'){
+   const parts=text.trim().split(/\s+/);
+   if(parts.length!==2){send(chat,'입력 형식 오류입니다. 주소와 금액을 공백으로 구분해 입력해 주세요.');return true;}
+   const result=sharedWallet.requestWithdrawal(user,parts[0],parts[1]);
+   send(chat,result.ok?'📤 출금 요청 #'+result.id+' 접수\n잔액을 보류 처리했습니다. 자동 전송 기능이 연결되기 전에는 송금되지 않습니다.':'출금 신청 실패: '+result.reason);
+   return true;
+ }
+ return false;
+}
+
 function guide(chat){send(chat,'GLORY ARENA | 이용 안내\n\n1. 그룹에 봇을 추가하세요.\n2. 매치 개설에서 게임과 경기 조건을 선택하세요.\n3. 상대의 신청을 수락하세요.\n4. 안내된 순서에 따라 공식 이모지 게임을 진행하세요.\n\n모든 대전은 무료입니다.',[[button('메인 메뉴','menu')]]);}
 function stats(chat,user){
 const r=one("SELECT COUNT(*) AS total, COALESCE(SUM(CASE WHEN (owner=? AND a>b) OR (guest=? AND b>a) THEN 1 ELSE 0 END),0) AS wins, COALESCE(SUM(CASE WHEN a=b THEN 1 ELSE 0 END),0) AS draws FROM matches WHERE state='finished' AND (owner=? OR guest=?)",user,user,user,user);
@@ -143,6 +183,8 @@ if(p[0]==='menu'){menu(cid);return;}
 if(p[0]==='stats'){stats(cid,user);return;}
 if(p[0]==='wallet'){walletMenu(cid,user);return;}
 if(p[0]==='wallet_history'){walletHistory(cid,user);return;}
+if(p[0]==='wallet_invoice'){walletInvoice(cid,user);return;}
+if(p[0]==='wallet_withdraw'){walletWithdraw(cid,user);return;}
 if(p[0]==='guide'){guide(cid);return;}
 if(chat.type==='private'){if(p[0]==='choose'){matchFlow.begin(user);return;}if(p[0]==='lobby'){matchFlow.lobby(user);return;}groupLink(cid);return;}
 if(p[0]==='lobby'){lobby(cid);return;}
@@ -154,10 +196,11 @@ if(['join','accept','reject','cancel'].includes(p[0])&&/^\d+$/.test(p[1]||'')){a
 const m=u.message;if(!m?.from||!['private','group','supergroup'].includes(m.chat?.type))return;
 if(setWelcome(m))return;
 const cid=m.chat.id,t=(m.text||'').split(/\s+/)[0].split('@')[0],full=m.text||'';
-if(['/start','/help'].includes(t)||full==='🏠 메인 메뉴'){if(m.chat.type!=='private'&&roomService.isGeneratedChat(cid)){send(cid,'⚜️ 이 그룹은 GLORY ARENA 전용 대전방입니다. 경기 진행 안내는 위 공지에서 확인해 주세요.');return;}menu(cid);return;}
+if(['/start','/help'].includes(t)||full==='🏠 메인 메뉴'){if(m.chat.type==='private')pendingWalletInput.delete(m.from.id);if(m.chat.type!=='private'&&roomService.isGeneratedChat(cid)){send(cid,'⚜️ 이 그룹은 GLORY ARENA 전용 대전방입니다. 경기 진행 안내는 위 공지에서 확인해 주세요.');return;}menu(cid);return;}
 if(full==='📖 이용 안내'){matchFlow.tutorial(cid);return;}
 if(m.chat.type==='private'&&['/wallet','/deposit','/balance'].includes(t)){walletMenu(cid,m.from.id);return;}
 if(m.chat.type==='private'&&t==='/deposits'){walletHistory(cid,m.from.id);return;}
+if(m.chat.type==='private'&&handleWalletInput(cid,m.from.id,full))return;
 if(m.chat.type==='private'&&matchFlow.onText(m.from.id,full))return;
 if(m.chat.type!=='private'&&['/resume','/status'].includes(t)){const current=one("SELECT id FROM matches WHERE chat=? AND state='active' ORDER BY id DESC LIMIT 1",cid);if(current)matchBoard.queueMatch(current.id);else send(cid,'현재 진행 중인 경기가 없습니다.');void drain();return;}
 if(m.chat.type!=='private'&&['/end','/stop','/close'].includes(t)){matchFlow.stopByChat(m.from.id,cid);return;}
@@ -383,5 +426,5 @@ webhookReady=true;console.log('Webhook update accepted',u.update_id);res.writeHe
 });
 server.listen(port,'0.0.0.0',()=>{console.log('GLORY ARENA HTTP server listening on',port);void register();});
 setInterval(()=>{void drain();void roomService.work();roomService.recover();matchFlow.tick();matchWatch.sync();matchWatch.tick();},5000).unref();
-setInterval(()=>{void tronDeposits.poll().then(r=>{if(r.credited)void drain();}).catch(e=>console.warn('TRON watcher:',String(e.message||e).slice(0,90)));},60000).unref();
-setTimeout(()=>{void tronDeposits.poll().then(r=>{if(r.credited)void drain();}).catch(e=>console.warn('TRON watcher startup:',String(e.message||e).slice(0,90)));},15000).unref();
+setInterval(()=>{void tronDeposits.poll().then(r=>{if(r.credited)void drain();}).catch(e=>console.warn('TRON watcher:',String(e.message||e).slice(0,90)));void sharedWallet.poll().then(r=>{if(r.credited)void drain();}).catch(e=>console.warn('Treasury watcher:',String(e.message||e).slice(0,90)));},60000).unref();
+setTimeout(()=>{void tronDeposits.poll().then(r=>{if(r.credited)void drain();}).catch(e=>console.warn('TRON watcher startup:',String(e.message||e).slice(0,90)));void sharedWallet.poll().then(r=>{if(r.credited)void drain();}).catch(e=>console.warn('Treasury watcher startup:',String(e.message||e).slice(0,90)));},15000).unref();
