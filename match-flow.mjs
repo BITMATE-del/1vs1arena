@@ -116,7 +116,7 @@ export function createMatchFlow(db, send, roomService, games, modes, rounds, opt
         if(!moneyAllowed()){run('UPDATE match_requests SET ready_owner=0,ready_guest=0 WHERE code=?',code);send(chat,'유료 대전이 비활성화되어 경기를 시작할 수 없습니다.');return;}
         const held=money.deposit(current.match_id,code,current.owner,current.guest,current.stake_micro);
         if(!held.ok){run('UPDATE match_requests SET ready_owner=0,ready_guest=0 WHERE code=?',code);send(chat,'⚠️ 참가금 예치 실패: 양쪽 회원의 지갑 잔액을 확인해 주세요. 두 명의 준비 상태를 초기화했습니다.');send(current.owner,'참가금 예치 실패. 회원 지갑 잔액 또는 경기 조건을 확인해 주세요.');send(current.guest,'참가금 예치 실패. 회원 지갑 잔액 또는 경기 조건을 확인해 주세요.');return;}
-        send(chat,'🔒 참가금 예치 완료 · 양측 각각 '+usdt(current.stake_micro)+' USDT\\n승리금은 총 판돈의 97%, 무승부·중단 시 전액 반환됩니다.');
+        send(chat,'🔒 참가금 예치 완료 · 양측 각각 '+usdt(current.stake_micro)+' USDT\n승리금은 총 판돈의 97%, 무승부·중단 시 전액 반환됩니다.');
       }
       run("UPDATE match_requests SET status='playing',updated=? WHERE code=?",Date.now(),code);run("UPDATE matches SET state='active',turn=owner WHERE id=? AND state='waiting'",current.match_id);const room=roomService.getByCode(current.room_code);if(room?.chat)options.onMatchStart?.(current.match_id);
     }
