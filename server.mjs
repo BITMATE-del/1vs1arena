@@ -435,6 +435,18 @@ let raw='';for await(const chunk of req){raw+=chunk.toString();if(raw.length>120
 const q=new URLSearchParams(raw),provided=q.get('csrf')||'';
 if(!/^[a-f0-9]{64}$/.test(provided)||!timingSafeEqual(Buffer.from(provided),Buffer.from(csrf))){res.writeHead(403).end();return true;}
 const act=q.get('action'),id=Number(q.get('id')),value=q.get('value')||'';let changed=false;
+if(act==='notice_retry'){
+  const key=String(q.get('event_key')||'');
+  const event=/^match:[1-9]\d*:(?:result|free_result|missing_escrow|settlement_pending|personal:[1-9]\d*)$/.test(key)?
+    one("SELECT * FROM match_notice_events WHERE event_key=?",key):null;
+  const changed=!!event&&event.status==='failed';
+  if(changed){
+    run("UPDATE match_notice_events SET status='queued',last_error=NULL WHERE event_key=? AND status='failed'",key);
+    repairNoticeQueue();
+    run('INSERT INTO admin_audit(at,action,target) VALUES(?,?,?)',Date.now(),'notice_retry',key);
+  }
+  res.writeHead(303,{location:'/admin?tab=operations&saved='+Number(changed)}).end();void drain();return true;
+}
 if(act==='bot_admin_add'||act==='bot_admin_remove'){
  const user=Number(q.get('admin_user_id'));
  const result=botAdmin.setAdmin(user,act==='bot_admin_add');
@@ -743,6 +755,7 @@ form('turn_warn_minutes','', '<label>미응답 안내 (분)<input type="number" 
 form('turn_timeout_minutes','', '<label>자동 종료 (분)<input type="number" name="value" min="1" max="1440" value="'+esc(setting('turn_timeout_minutes','20'))+'"></label>','제한시간 저장')+'</section>'+
 '<section><h2>현재 경기 모니터링</h2>'+table(['경기','방','종목','라운드','현재 차례','턴 시작','경고'],watches.map(r=>tr([r.id,r.chat,r.game+' / '+(modes[r.mode]||r.mode),r.round,(r.player?'@'+r.player:'회원 ID '+(one('SELECT turn FROM matches WHERE id=?',r.id)?.turn||'-')),date(r.turn_started),r.warned_at?'경고 발송':'정상'])))+'</section>'+
 '<section><h2>운영 오류 및 경고</h2>'+table(['시간','종류','경기','그룹 코드','상세'],alerts.map(r=>tr([date(r.created),r.kind,r.match_id||'-',r.room_code||'-',r.detail])))+'</section>'+
+'<section><h2>중요 경기 결과 알림 현황</h2><p>실패 알림은 오류를 확인한 뒤 수동 재전송할 수 있습니다. 회원 계정이 봇을 차단했을 경우 재전송해도 수신되지 않습니다.</p>'+table(['경기','수신처','상태','오류','관리'],all("SELECT * FROM match_notice_events ORDER BY created DESC LIMIT 40").map(e=>tr([e.match_id,e.chat,e.status,e.last_error||'-',e.status==='failed'?form('notice_retry','', '<input type=\"hidden\" name=\"event_key\" value=\"'+esc(e.event_key)+'\">','알림 재전송'):'-'])))+'</section>'+
 '<section><h2>삭제 실패 방 재처리</h2><p>자동 재시도를 반복하지 않습니다. 원인 확인 후 직접 재시도를 실행하세요.</p>'+
 table(['코드','상태','오류','관리'],failures.map(r=>tr([r.code,r.match_status||'-',r.room_error||r.last_error||'-'],'<td>'+form('close_retry','', '<input type="hidden" name="code" value="'+esc(r.code)+'">','방 삭제 재시도')+'</td>')))+'</section>';
 }
@@ -763,6 +776,6 @@ webhookReady=true;console.log('Webhook update accepted',u.update_id);res.writeHe
 }catch(e){console.error('Webhook processing failed',e?.name||'Error',String(e?.message||'unknown').slice(0,180));res.writeHead(500).end();}
 });
 server.listen(port,'0.0.0.0',()=>{console.log('GLORY ARENA HTTP server listening on',port);void register();});
-setInterval(()=>{moneyEngine.reconcile();for(const row of all("SELECT m.id FROM matches m LEFT JOIN match_notice_events n ON n.match_id=m.id AND n.event_key='match:'||m.id||':result' WHERE m.state='finished' AND m.id>(SELECT cutoff_match_id FROM match_notice_settings WHERE id=1) AND n.event_key IS NULL ORDER BY m.id DESC LIMIT 20"))announceMatchSettlement(row.id);repairNoticeQueue();void drain();void roomService.work();roomService.recover();matchFlow.tick();matchWatch.sync();matchWatch.tick();settlementJournal.reconcile();},5000).unref();
+setInterval(()=>{moneyEngine.reconcile();for(const row of all("SELECT m.id FROM matches m LEFT JOIN money_escrow e ON e.match_id=m.id LEFT JOIN money_settlements st ON st.match_id=m.id WHERE m.state='finished' AND m.id>(SELECT cutoff_match_id FROM match_notice_settings WHERE id=1) AND ((e.match_id IS NOT NULL AND st.match_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM match_notice_events n WHERE n.event_key='match:'||m.id||':result')) OR (e.match_id IS NULL AND NOT EXISTS(SELECT 1 FROM match_notice_events n WHERE n.event_key IN ('match:'||m.id||':free_result','match:'||m.id||':missing_escrow')))) ORDER BY m.id LIMIT 50"))announceMatchSettlement(row.id);repairNoticeQueue();void drain();void roomService.work();roomService.recover();matchFlow.tick();matchWatch.sync();matchWatch.tick();settlementJournal.reconcile();},5000).unref();
 setInterval(()=>{void tronDeposits.poll().then(r=>{if(r.credited)void drain();}).catch(e=>console.warn('TRON watcher:',String(e.message||e).slice(0,90)));void sharedWallet.poll().then(r=>{if(r.credited)void drain();}).catch(e=>console.warn('Treasury watcher:',String(e.message||e).slice(0,90)));},60000).unref();
 setTimeout(()=>{void tronDeposits.poll().then(r=>{if(r.credited)void drain();}).catch(e=>console.warn('TRON watcher startup:',String(e.message||e).slice(0,90)));void sharedWallet.poll().then(r=>{if(r.credited)void drain();}).catch(e=>console.warn('Treasury watcher startup:',String(e.message||e).slice(0,90)));},15000).unref();
