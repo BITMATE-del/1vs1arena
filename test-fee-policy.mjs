@@ -1,0 +1,17 @@
+import assert from 'node:assert/strict';
+import {projectPrize,PLATFORM_FEE_BPS} from './fee-policy.mjs';
+assert.equal(PLATFORM_FEE_BPS,300);
+const a=projectPrize(100000000n);
+assert.equal(a.pool,200000000n);
+assert.equal(a.fee,6000000n);
+assert.equal(a.winnerPayout,194000000n);
+assert.equal(a.previewOnly,true);
+assert.equal(a.winnerPayout*100n/a.stakeA,194n);
+const unequal=projectPrize(100000000n,200000000n);
+assert.equal(unequal.fee,9000000n);
+assert.equal(unequal.winnerPayout,291000000n);
+assert.equal(unequal.pool,unequal.winnerPayout+unequal.fee);
+assert.throws(()=>projectPrize(0n),RangeError);
+assert.throws(()=>projectPrize(1000000n,1000000n,-1),RangeError);
+assert.throws(()=>projectPrize(1000000n,1000000n,10001),RangeError);
+console.log('GLORY ARENA fixed 3% fee preview tests PASS: pot fee, 1.94x payout, unequal stakes, conservation, invalid inputs');
