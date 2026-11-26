@@ -257,6 +257,23 @@ let raw='';for await(const chunk of req){raw+=chunk.toString();if(raw.length>120
 const q=new URLSearchParams(raw),provided=q.get('csrf')||'';
 if(!/^[a-f0-9]{64}$/.test(provided)||!timingSafeEqual(Buffer.from(provided),Buffer.from(csrf))){res.writeHead(403).end();return true;}
 const act=q.get('action'),id=Number(q.get('id')),value=q.get('value')||'';let changed=false;
+if(act==='treasury_set'){
+ const addr=(q.get('treasury_address')||'').trim();
+ const result=sharedWallet.setAddress(addr);
+ if(result)run('INSERT INTO admin_audit(at,action,target) VALUES(?,?,?)',Date.now(),'treasury_set',addr);
+ res.writeHead(303,{location:'/admin?tab=deposits&saved='+Number(result)}).end();return true;
+}
+if(act==='treasury_check'){
+ const result=await sharedWallet.poll();
+ if(result.credited)void drain();
+ res.writeHead(303,{location:'/admin?tab=deposits&saved='+Number(!result.error)}).end();return true;
+}
+if(act==='treasury_withdraw_cancel'){
+ const id=Number(q.get('withdrawal_id'));
+ const result=Number.isSafeInteger(id)&&sharedWallet.cancelWithdrawal(id);
+ if(result)run('INSERT INTO admin_audit(at,action,target) VALUES(?,?,?)',Date.now(),'treasury_withdraw_cancel',String(id));
+ res.writeHead(303,{location:'/admin?tab=deposits&saved='+Number(!!result)}).end();return true;
+}
 if(act==='tron_assign'){
  const user=Number(q.get('user_id')),addr=(q.get('deposit_address')||'').trim();
  const done=tronDeposits.assign(user,addr);
@@ -379,16 +396,21 @@ content='<section><h2>대전 신청 현황</h2><p>상대 확인, 신청 수락, 
 '<section><h2>전용 그룹 공지 문구</h2>'+form('flow_room_notice','', '<textarea name="value" rows="9" maxlength="1800" required>'+esc(matchFlow.config('text_room_notice','📌 GLORY ARENA 경기 안내\n\n두 참가자 모두 공지를 확인하고 준비 완료를 눌러주세요.\n모든 대전은 무료입니다.'))+'</textarea>','문구 저장')+'</section>';
 }
 if(tab==='deposits'){
+const fixed=sharedWallet.status(),invoices=all('SELECT i.*,u.username FROM treasury_invoices i LEFT JOIN arena_users u ON u.id=i.user_id ORDER BY i.id DESC LIMIT 75'),requests=all('SELECT * FROM treasury_withdrawals ORDER BY id DESC LIMIT 75'),unmatched=all('SELECT * FROM treasury_unmatched ORDER BY detected DESC LIMIT 50');
 const st=tronDeposits.status();
 const addr=all("SELECT d.user_id,d.address,d.active_from,u.username,u.name,COALESCE(w.balance_micro,0) AS balance_micro FROM tron_deposit_addresses d JOIN arena_users u ON u.id=d.user_id LEFT JOIN tron_wallets w ON w.user_id=d.user_id ORDER BY d.created DESC LIMIT 75");
 const tx=all("SELECT d.txid,d.user_id,d.amount_micro,d.block_time,d.credited FROM tron_deposits d ORDER BY d.credited DESC LIMIT 75");
 const errors=all("SELECT * FROM tron_monitor_events WHERE kind!='address_set' ORDER BY id DESC LIMIT 20");
-content='<div class="grid">'+[['감시 상태',st.enabled&&st.apiConfigured?'활성':'설정 대기'],['TronGrid API',st.apiConfigured?'설정됨':'미설정'],['등록된 주소',st.addressCount],['자동 충전 건수',st.credits]].map(([k,v])=>'<section><small>'+esc(k)+'</small><div class="metric">'+esc(v)+'</div></section>').join('')+'</div>'+
-'<section><h2>USDT/TRC20 자동 입금 설정</h2><p>Railway 환경변수 TRONGRID_API_KEY와 TRON_DEPOSITS_ENABLED=1을 설정해야 자동 감지가 작동합니다. TronGrid는 주소 생성 기능을 제공하지 않습니다. 회원별 입금주소는 관리자가 개별 배정해야 하며, 주소 배정 전에 발생한 거래는 자동 충전하지 않습니다. 다른 체인의 토큰이나 미확정 거래는 반영되지 않습니다.</p>'+
+content='<div class="grid">'+[['감시 상태',fixed.enabled&&fixed.apiConfigured?'활성':'설정 대기'],['TronGrid API',st.apiConfigured?'설정됨':'미설정'],['등록된 주소',st.addressCount],['자동 충전 건수',st.credits]].map(([k,v])=>'<section><small>'+esc(k)+'</small><div class="metric">'+esc(v)+'</div></section>').join('')+'</div>'+
+'<section><h2>공용 USDT/TRC20 입출금 지갑</h2><p>모든 회원은 같은 운영 지갑주소로 입금합니다. 회원별 고유 입금액으로 매칭하며, 미확정·금액 불일치·만료 입금은 자동 반영하지 않습니다. 출금은 동일 운영 지갑에서 보내도록 설계하지만 현재 송금·서명 서비스가 없어 신청과 잔액 보류만 가능합니다.</p><p>공용 주소: '+esc(fixed.address||'미등록')+' · 잔액 반영: '+(fixed.enabled&&fixed.apiConfigured?'설정 활성':'비활성')+' · 미매칭 입금: '+fixed.unmatched+'건 · 출금 신청: '+fixed.withdrawals+'건</p>'+form('treasury_set','', '<input name="treasury_address" maxlength="34" value="'+esc(fixed.address||'')+'" placeholder="T로 시작하는 운영 지갑 주소" required>','고정 지갑주소 등록')+form('treasury_check','','고정 지갑 입금 재확인')+'</section>'+
+'<section><h2>입금 감시 설정</h2><p>Railway에 TRONGRID_API_KEY와 SHARED_USDT_ENABLED=1을 등록하면 공용 지갑의 확정 거래만 조회·충전 처리합니다. 정확히 일치하는 활성 입금 신청이 없으면 보류합니다. 개인키는 등록하지 마세요.</p>'+
 '<p>마지막 확인: '+(st.lastChecked?date(st.lastChecked):'아직 없음')+' · 오류: '+esc(st.lastError||'없음')+'</p>'+
 form('tron_rescan','','지금 입금 재확인')+'</section>'+
 '<section><h2>회원별 입금주소 배정</h2><p>실제 본사가 통제하는 회원 전용 TRON 주소만 등록하세요. 개인키는 입력하지 않습니다. 동일 주소 중복 배정 및 주소 체크섬 오류를 차단합니다.</p>'+
-form('tron_assign','', '<input name="user_id" type="number" min="1" placeholder="회원 텔레그램 숫자 ID" required><input name="deposit_address" maxlength="34" placeholder="T로 시작하는 TRON 입금주소" required>','입금주소 배정')+'</section>'+
+form('tron_assign','', '<input name="user_id" type="number" min="1" placeholder="회원 텔레그램 숫자 ID" required><input name="deposit_address" maxlength="34" placeholder="T로 시작하는 TRON 입금주소" required>','기존 회원별 주소 배정')+'</section>'+
+'<section><h2>공용 지갑 충전 신청</h2>'+table(['번호','회원','정확한 금액','상태','생성일','TXID'],invoices.map(r=>tr([r.id,r.username?'@'+r.username:r.user_id,usdtDisplay(r.amount_micro),r.status,date(r.created),r.txid||'-'])))+'</section>'+
+'<section><h2>미매칭 거래 · 관리자 확인</h2><p>미매칭 입금은 자동으로 다른 회원에게 배정하지 않습니다.</p>'+table(['TXID','수량','사유','감지 시각'],unmatched.map(r=>tr([r.txid,usdtDisplay(r.amount_micro),r.reason,date(r.detected)])))+'</section>'+
+'<section><h2>출금 신청 · 송금 연동 전</h2><p>신청액은 회원 잔액에서 보류 처리됩니다. 송금 기능은 연결되지 않아 자동 출금되지 않습니다. 요청 취소 시에만 잔액이 복구됩니다.</p>'+table(['번호','회원','받는 주소','USDT','상태','요청 시각','관리'],requests.map(r=>tr([r.id,r.user_id,r.to_address,usdtDisplay(r.amount_micro),r.status,date(r.created)],'<td>'+(r.status==='requested'?form('treasury_withdraw_cancel','', '<input name="withdrawal_id" type="hidden" value="'+r.id+'">','신청 취소·보류 해제'):'-')+'</td>')))+'</section>'+
 '<section><h2>회원 지갑 현황</h2>'+table(['회원 ID','이름','입금주소','등록 시각','USDT 잔액'],addr.map(a=>tr([a.user_id,a.username?'@'+a.username:a.name,a.address,date(a.active_from),usdtDisplay(a.balance_micro)])))+'</section>'+
 '<section><h2>확정 입금 내역</h2>'+table(['거래 해시','회원 ID','충전 USDT','체인 시간','반영 시간'],tx.map(r=>tr([r.txid,r.user_id,usdtDisplay(r.amount_micro),date(r.block_time),date(r.credited)])))+'</section>'+
 '<section><h2>입금 감시 오류</h2>'+table(['시각','구분','내용'],errors.map(r=>tr([date(r.at),r.kind,r.detail])))+'</section>';
