@@ -59,7 +59,15 @@ const finishMessage=messages.findLast(m=>m.user===-10012001200&&m.message.includ
 assert(finishMessage?.keyboard?.flat().some(b=>b.callback_data?.includes(':yes')),'ask both players to rematch');
 act(1001,-10012001200,['mf','again',row.code,'yes']);assert.equal(flow.votesFor(row.code).owner_vote,'yes');
 act(1001,-10012001200,['mf','again',row.code,'yes']);assert.equal(flow.votesFor(row.code).guest_vote,null,'repeat owner vote cannot count for guest');
-act(1002,-10012001200,['mf','again',row.code,'yes']);assert.equal(get().status,'playing');
+act(1002,-10012001200,['mf','again',row.code,'yes']);assert.equal(get().status,'finished','both agree then reconfigure');
+act(1001,-10012001200,['mf','rematch',row.code,'change']);
+act(1001,-10012001200,['mf','rematch',row.code,'game','🎲']);
+act(1001,-10012001200,['mf','rematch',row.code,'mode','wins']);
+act(1001,-10012001200,['mf','rematch',row.code,'round','5']);
+act(1001,-10012001200,['mf','rematch',row.code,'stake_same']);
+assert.equal(get().status,'finished','guest must approve new rules');
+act(1002,-10012001200,['mf','rematch',row.code,'approve']);
+assert.equal(get().status,'playing');
 const rematch=db.prepare('SELECT * FROM matches WHERE id=?').get(get().match_id);
 assert.notEqual(rematch.id,match.id,'rematch is a separate historic match');
 assert.deepEqual(matchStarts,[match.id,rematch.id],'single board refresh for each match start');
