@@ -69,6 +69,7 @@ export function createTronDeposits(db,send,options={}){
     const assigned=one('SELECT address,active_from FROM tron_deposit_addresses WHERE user_id=?',user);
     if(!assigned||assigned.address!==address||transfer.timestamp<assigned.active_from)return false;
     if(one('SELECT txid FROM tron_deposits WHERE txid=? AND address=?',transfer.txid,address))return false;
+    if(one("SELECT 1 FROM wallet_manual_ops WHERE kind='manual_deposit' AND lower(reference)=?",transfer.txid.toLowerCase()))return false;
     const amount=BigInt(transfer.amount),max=9223372036854775807n;
     const current=BigInt(balance(user));
     if(amount<=0n||amount>BigInt(Number.MAX_SAFE_INTEGER)||current+amount>BigInt(Number.MAX_SAFE_INTEGER))throw Error('BALANCE_LIMIT');
