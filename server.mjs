@@ -344,6 +344,10 @@ function announceMatchSettlement(id){
   const title='🏆 GLORY ARENA | 챔피언 탄생 🏆\n━━━━━━━━━━━━━━━━\n\n';
   const score='\n\n🎮 '+m.game+' · '+m.rounds+'판\n📊 최종 스코어  A '+m.a+' : '+m.b+' B\n🎫 매치 코드: '+code;
   const escrow=moneyEngine.escrow(id);
+  if(!escrow && m.state==='cancelled'){
+    criticalNotice(id,m.chat,'cancel_no_escrow','🛑 GLORY ARENA 경기 취소\n🎫 '+code+'\n참가금 예치 전 취소되어 금전 이동 및 수수료가 발생하지 않았습니다.');
+    return;
+  }
   if(!escrow && (!request || Number(request.stake_micro)!==0)){
     matchWatch.incident('missing_financial_escrow',id,'종료 경기의 참가금/예치 기록 불일치');
     criticalNotice(id,m.chat,'missing_escrow','⚠️ GLORY ARENA 경기 정산 확인 필요\n🎫 '+code+'\n유료 경기인지 확인할 참가금·예치 기록이 일치하지 않습니다. 임의로 무료 경기나 지급 완료로 처리하지 않습니다.');
@@ -443,7 +447,7 @@ if(act==='room_cleanup_partial'){
 }
 if(act==='notice_retry'){
   const key=String(q.get('event_key')||'');
-  const event=/^match:[1-9]\d*:(?:result|free_result|missing_escrow|settlement_pending|personal:[1-9]\d*)$/.test(key)?
+  const event=/^match:[1-9]\d*:(?:result|free_result|cancel_no_escrow|missing_escrow|settlement_pending|personal:[1-9]\d*)$/.test(key)?
     one("SELECT * FROM match_notice_events WHERE event_key=?",key):null;
   const changed=!!event&&event.status==='failed';
   if(changed){
@@ -782,6 +786,7 @@ webhookReady=true;console.log('Webhook update accepted',u.update_id);res.writeHe
 }catch(e){console.error('Webhook processing failed',e?.name||'Error',String(e?.message||'unknown').slice(0,180));res.writeHead(500).end();}
 });
 server.listen(port,'0.0.0.0',()=>{console.log('GLORY ARENA HTTP server listening on',port);void register();});
-setInterval(()=>{moneyEngine.reconcile();for(const row of all("SELECT m.id FROM matches m LEFT JOIN money_escrow e ON e.match_id=m.id LEFT JOIN money_settlements st ON st.match_id=m.id WHERE m.state='finished' AND m.id>(SELECT cutoff_match_id FROM match_notice_settings WHERE id=1) AND ((e.match_id IS NOT NULL AND st.match_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM match_notice_events n WHERE n.event_key='match:'||m.id||':result')) OR (e.match_id IS NULL AND NOT EXISTS(SELECT 1 FROM match_notice_events n WHERE n.event_key IN ('match:'||m.id||':free_result','match:'||m.id||':missing_escrow')))) ORDER BY m.id LIMIT 50"))announceMatchSettlement(row.id);repairNoticeQueue();void drain();void roomService.work();roomService.recover();matchFlow.tick();matchWatch.sync();matchWatch.tick();settlementJournal.reconcile();},5000).unref();
+const safeIntervalJob=(name,job)=>{try{const p=job();if(p&&typeof p.catch==='function')p.catch(e=>console.error('Arena periodic task failure',name,String(e?.message||e).slice(0,120)));}catch(e){console.error('Arena periodic task failure',name,String(e?.message||e).slice(0,120));}};
+setInterval(()=>{safeIntervalJob('money_reconcile',()=>moneyEngine.reconcile());for(const row of all("SELECT m.id FROM matches m LEFT JOIN money_escrow e ON e.match_id=m.id LEFT JOIN money_settlements st ON st.match_id=m.id WHERE m.state='finished' AND m.id>(SELECT cutoff_match_id FROM match_notice_settings WHERE id=1) AND ((e.match_id IS NOT NULL AND st.match_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM match_notice_events n WHERE n.event_key='match:'||m.id||':result')) OR (e.match_id IS NULL AND NOT EXISTS(SELECT 1 FROM match_notice_events n WHERE n.event_key IN ('match:'||m.id||':free_result','match:'||m.id||':missing_escrow','match:'||m.id||':cancel_no_escrow')))) ORDER BY m.id LIMIT 50"))safeIntervalJob('settlement_notice',()=>announceMatchSettlement(row.id));safeIntervalJob('notice_queue',repairNoticeQueue);safeIntervalJob('outbox_drain',drain);safeIntervalJob('room_work',()=>roomService.work());safeIntervalJob('room_recover',()=>roomService.recover());safeIntervalJob('match_flow_tick',()=>matchFlow.tick());safeIntervalJob('watch_sync',()=>matchWatch.sync());safeIntervalJob('watch_tick',()=>matchWatch.tick());safeIntervalJob('settlement_journal',()=>settlementJournal.reconcile());},5000).unref();
 setInterval(()=>{void tronDeposits.poll().then(r=>{if(r.credited)void drain();}).catch(e=>console.warn('TRON watcher:',String(e.message||e).slice(0,90)));void sharedWallet.poll().then(r=>{if(r.credited)void drain();}).catch(e=>console.warn('Treasury watcher:',String(e.message||e).slice(0,90)));},60000).unref();
 setTimeout(()=>{void tronDeposits.poll().then(r=>{if(r.credited)void drain();}).catch(e=>console.warn('TRON watcher startup:',String(e.message||e).slice(0,90)));void sharedWallet.poll().then(r=>{if(r.credited)void drain();}).catch(e=>console.warn('Treasury watcher startup:',String(e.message||e).slice(0,90)));},15000).unref();
