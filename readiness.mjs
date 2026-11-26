@@ -11,7 +11,7 @@ export function summarizeReadiness(input){
   {id:'treasury',label:'공용 USDT 입금주소',ok:Boolean(input.treasuryAddress),kind:'finance',detail:input.treasuryAddress?'고정 주소 등록됨':'공용 입금주소 미등록'},
   {id:'deposits',label:'공용 USDT 자동 입금',ok:input.sharedDepositsEnabled===true&&Boolean(input.tronKey)&&Boolean(input.treasuryAddress),kind:'finance',detail:input.sharedDepositsEnabled&&input.tronKey&&input.treasuryAddress?'설정 활성 · 실거래 검증 별도':'미활성 · 주소/API 키/환경변수 확인'},
   {id:'withdrawals',label:'USDT 자동 출금 송금',ok:false,kind:'finance',detail:'송금 서명·검증 기능 미연동, 신청/보류만 가능'},
-  {id:'settlement',label:'USDT 참가금·승리금 실제 정산',ok:false,kind:'finance',detail:'3% 수수료 계산·판정 감사만 활성, 실제 금전 이동 차단'}
+  {id:'settlement',label:'USDT 참가금·승리금 내부 정산',ok:input.internalSettlementEnabled===true,kind:'finance',detail:input.internalSettlementEnabled?'양측 참가금 예치·3% 수수료·승리금 지급·환급 작동 (온체인 출금 별도)':'내부 정산 설정 비활성'}
  ];
  return {checks,freeReady:checks.filter(x=>x.kind==='free').every(x=>x.ok)&&checks.find(x=>x.id==='telegram').ok,allReady:checks.every(x=>x.ok)};
 }
