@@ -12,6 +12,8 @@ export function parseUsdt(s){
 export function createSharedWallet(db,send,opts={}){
   db.exec("CREATE TABLE IF NOT EXISTS treasury_settings(key TEXT PRIMARY KEY,value TEXT NOT NULL);CREATE TABLE IF NOT EXISTS treasury_invoices(id INTEGER PRIMARY KEY AUTOINCREMENT,user_id INTEGER NOT NULL,address TEXT NOT NULL,amount_micro INTEGER NOT NULL UNIQUE,base_micro INTEGER NOT NULL,created INTEGER NOT NULL,expires INTEGER NOT NULL,status TEXT NOT NULL DEFAULT 'pending',txid TEXT,paid INTEGER,UNIQUE(txid,address));CREATE TABLE IF NOT EXISTS treasury_unmatched(txid TEXT NOT NULL,address TEXT NOT NULL,amount_micro INTEGER NOT NULL,block_time INTEGER NOT NULL,reason TEXT NOT NULL,detected INTEGER NOT NULL,PRIMARY KEY(txid,address));CREATE TABLE IF NOT EXISTS treasury_withdrawals(id INTEGER PRIMARY KEY AUTOINCREMENT,user_id INTEGER NOT NULL,to_address TEXT NOT NULL,amount_micro INTEGER NOT NULL,status TEXT NOT NULL DEFAULT 'requested',created INTEGER NOT NULL,updated INTEGER NOT NULL,txid TEXT,reason TEXT)");
   const one=(q,...p)=>db.prepare(q).get(...p),all=(q,...p)=>db.prepare(q).all(...p),run=(q,...p)=>db.prepare(q).run(...p);
+  const onEvent=opts.onEvent||(()=>{});
+  const emit=event=>{try{onEvent(event);}catch(e){console.warn('Treasury admin notification failed:',String(e?.message||e).slice(0,100));}};
   const now=opts.now||Date.now,apiKey=opts.apiKey??process.env.TRONGRID_API_KEY??'',fetcher=opts.fetcher||fetch;
   const base=opts.baseUrl||'https://api.trongrid.io';
   const enabled=()=>opts.enabled?.()??(process.env.SHARED_USDT_ENABLED==='1');
@@ -44,7 +46,9 @@ export function createSharedWallet(db,send,opts={}){
       // Keep amounts reserved even after expiry: never credit old transfers to new customers.
       if(one('SELECT id FROM treasury_invoices WHERE amount_micro=?',Number(amount)))continue;
       const result=run("INSERT INTO treasury_invoices(user_id,address,amount_micro,base_micro,created,expires,status) VALUES(?,?,?,?,?,?,'pending')",user,addr,Number(amount),Number(baseAmount),t,t+30*60000);
-      return {ok:true,invoice:one('SELECT * FROM treasury_invoices WHERE id=?',Number(result.lastInsertRowid))};
+      const inv=one('SELECT * FROM treasury_invoices WHERE id=?',Number(result.lastInsertRowid));
+      emit({type:'invoice',key:'invoice:'+inv.id,user,amount:inv.amount_micro,address:addr,invoiceId:inv.id});
+      return {ok:true,invoice:inv};
     }
     return {ok:false,reason:'NO_UNIQUE_AMOUNT'};
   }
@@ -59,7 +63,8 @@ export function createSharedWallet(db,send,opts={}){
     return String(r?.id||'').toLowerCase()===txid&&r.receipt?.result==='SUCCESS'&&!r.resMessage;
   }
   function recordUnmatched(tx,reason){
-    run('INSERT OR IGNORE INTO treasury_unmatched(txid,address,amount_micro,block_time,reason,detected) VALUES(?,?,?,?,?,?)',tx.txid,treasury(),Number(tx.amount),tx.timestamp,reason,now());
+    const r=run('INSERT OR IGNORE INTO treasury_unmatched(txid,address,amount_micro,block_time,reason,detected) VALUES(?,?,?,?,?,?)',tx.txid,treasury(),Number(tx.amount),tx.timestamp,reason,now());
+    if(r.changes)emit({type:'unmatched',key:'unmatched:'+tx.txid+':'+treasury(),amount:Number(tx.amount),address:treasury(),txid:tx.txid,reason});
   }
   function apply(tx,amountCount=1){
     if(amountCount!==1||!enabled())return false;
@@ -80,6 +85,7 @@ export function createSharedWallet(db,send,opts={}){
       run('DELETE FROM treasury_unmatched WHERE txid=? AND address=?',tx.txid,addr);
       db.exec('RELEASE shared_credit');
     }catch(e){db.exec('ROLLBACK TO shared_credit');db.exec('RELEASE shared_credit');throw e;}
+    emit({type:'credit',key:'credit:'+tx.txid+':'+addr,user:intent.user_id,amount:Number(amount),address:addr,txid:tx.txid,invoiceId:intent.id});
     send(intent.user_id,'✅ USDT 입금 확인 완료\n충전: '+usdtDisplay(amount)+' USDT\n현재 잔액: '+usdtDisplay(current+amount)+' USDT\n거래: '+tx.txid.slice(0,16)+'…');
     return true;
   }
@@ -131,6 +137,7 @@ export function createSharedWallet(db,send,opts={}){
       if(!result.changes){db.exec('ROLLBACK TO reserve_withdraw');db.exec('RELEASE reserve_withdraw');return {ok:false,reason:'INSUFFICIENT_BALANCE'};}
       const id=Number(run('INSERT INTO treasury_withdrawals(user_id,to_address,amount_micro,created,updated) VALUES(?,?,?,?,?)',user,toAddress,Number(amount),t,t).lastInsertRowid);
       db.exec('RELEASE reserve_withdraw');
+      emit({type:'withdrawal',key:'withdraw:'+id,user,withdrawalId:id,amount:Number(amount),address:toAddress});
       return {ok:true,id};
     }catch(e){db.exec('ROLLBACK TO reserve_withdraw');db.exec('RELEASE reserve_withdraw');throw e;}
   }
@@ -142,6 +149,7 @@ export function createSharedWallet(db,send,opts={}){
       run("UPDATE treasury_withdrawals SET status='cancelled',updated=? WHERE id=? AND status='requested'",now(),id);
       run('UPDATE tron_wallets SET balance_micro=balance_micro+?,updated=? WHERE user_id=?',row.amount_micro,now(),row.user_id);
       db.exec('RELEASE cancel_withdraw');
+      emit({type:'withdraw_cancel',key:'withdraw-cancel:'+id,user:row.user_id,withdrawalId:id,amount:row.amount_micro,address:row.to_address});
       return true;
     }catch(e){db.exec('ROLLBACK TO cancel_withdraw');db.exec('RELEASE cancel_withdraw');throw e;}
   }
