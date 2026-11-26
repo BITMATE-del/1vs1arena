@@ -24,7 +24,12 @@ export function createTelegramAuth(db, secret, adminPassword) {
       try{
         const decipher=createDecipheriv('aes-256-gcm',candidate,bytes.subarray(0,12));
         decipher.setAuthTag(bytes.subarray(12,28));
-        return Buffer.concat([decipher.update(bytes.subarray(28)),decipher.final()]).toString();
+        const plaintext=Buffer.concat([decipher.update(bytes.subarray(28)),decipher.final()]).toString();
+        if(!candidate.equals(key)){
+          // One-way migration to the stable key, conditional on the old ciphertext.
+          db.prepare('UPDATE telegram_account_session SET encrypted=? WHERE id=1 AND encrypted=?').run(seal(plaintext),raw);
+        }
+        return plaintext;
       }catch(e){last=e;}
     }
     throw Error('SESSION_DECRYPT_FAILED');
