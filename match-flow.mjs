@@ -11,6 +11,17 @@ export function createMatchFlow(db, send, roomService, games, modes, rounds, opt
   db.exec("CREATE TABLE IF NOT EXISTS match_flow_settings(key TEXT PRIMARY KEY,value TEXT NOT NULL)");
   const config=(key,defaultValue)=>one('SELECT value FROM match_flow_settings WHERE key=?',key)?.value??defaultValue;
   const mins=()=>Math.max(5,Math.min(120,Number(config('request_minutes','60'))||60));
+  try{db.exec("ALTER TABLE match_requests ADD COLUMN stake_micro INTEGER NOT NULL DEFAULT 0");}catch(e){if(!String(e.message).includes('duplicate column name'))throw e;}
+  const money=options.money||null;
+  const moneyAllowed=()=>options.paidMatchesEnabled?.()===true&&!!money;
+  const usdt=v=>(Number(v)/1000000).toFixed(2).replace(/\\.00$/,'');
+  const stakeLabel=r=>r.stake_micro>0?'참가금 '+usdt(r.stake_micro)+' USDT / 총 판돈 '+usdt(r.stake_micro*2)+' USDT / 수수료 3%':'무료 대전';
+  function offerStake(user,code){
+    const r=get(code);if(!r||r.owner!==user||r.status!=='selecting')return;
+    const opts=[[btn('🆓 무료 대전','mf:stake:'+code+':0')]];
+    if(moneyAllowed())for(const st of [1,5,10,50,100])opts.push([btn('💎 양측 각각 '+st+' USDT','mf:stake:'+code+':'+st)]);
+    send(user,'💎 참가금 선택\\n\\n유료 대전은 양쪽 참가금이 경기 시작 전에 지갑에서 예치됩니다. 승리 시 총 판돈에서 3%를 제외하고 지급하며 무승부·중단 시 전액 반환합니다.\\n\\n'+r.game+' '+r.rounds+'판',opts);
+  }
   db.exec("CREATE TABLE IF NOT EXISTS match_continue_votes(code TEXT PRIMARY KEY, owner_vote TEXT, guest_vote TEXT, deadline INTEGER NOT NULL, close_after INTEGER, state TEXT NOT NULL DEFAULT 'voting', last_error TEXT, updated INTEGER NOT NULL)");
   const votesFor=code=>one("SELECT * FROM match_continue_votes WHERE code=?",code);
   db.exec("CREATE TABLE IF NOT EXISTS match_stop_requests(code TEXT PRIMARY KEY, requested_by INTEGER NOT NULL, expires INTEGER NOT NULL, state TEXT NOT NULL DEFAULT 'pending', updated INTEGER NOT NULL)");
@@ -19,7 +30,7 @@ export function createMatchFlow(db, send, roomService, games, modes, rounds, opt
 
   const name=id=>{const u=one('SELECT name,username FROM arena_users WHERE id=?',id);return u?.username?'@'+u.username:u?.name||String(id);};
   const btn=(label,code)=>({text:label,callback_data:code});
-  const sendMain=user=>send(user,'⚜️ GLORY ARENA\n1:1 무료 대전\n\n진행 방식을 선택하세요. 상대를 정하거나 공개 대기실에서 신청을 받을 수 있습니다.',[[btn('🎯 상대 지정 대결','mf:begin')],[btn('⏳ 매치 대기 등록','mf:public')],[btn('🏛 대기 중인 매치','mf:lobby'),btn('🎮 내 경기','mf:mine')],[btn('📖 이용 안내','mf:help')]]);
+  const sendMain=user=>send(user,'⚜️ GLORY ARENA\n1:1 대전\n\n진행 방식을 선택하세요. 상대를 정하거나 공개 대기실에서 신청을 받을 수 있습니다.',[[btn('🎯 상대 지정 대결','mf:begin')],[btn('⏳ 매치 대기 등록','mf:public')],[btn('🏛 대기 중인 매치','mf:lobby'),btn('🎮 내 경기','mf:mine')],[btn('📖 이용 안내','mf:help')]]);
   const text=(key,fallback)=>config('text_'+key,fallback);
   function tutorial(user){send(user,text('guide','📖 GLORY ARENA 이용 안내\n\n① 상대방 아이디를 입력하거나 공개 대기실에서 신청합니다.\n② 신청서를 확인하고 상대방이 수락합니다.\n③ 전용 비공개 그룹이 생성됩니다.\n④ 양쪽 모두 공지 확인과 준비 완료를 누릅니다.\n⑤ 텔레그램 공식 이모지 게임으로 승부를 겨룹니다.\n\n모든 대전은 무료이며 입금과 보증금이 없습니다.'),[[btn('⚔ 첫 매치 개설','mf:begin')],[btn('🏠 메인 메뉴','mf:home')]]);}
   const get=code=>one('SELECT * FROM match_requests WHERE code=?',code);
@@ -32,25 +43,25 @@ export function createMatchFlow(db, send, roomService, games, modes, rounds, opt
     if(!match||match.blocked||match.id===user){send(user,'상대방을 확인할 수 없습니다. 상대방이 먼저 봇에서 /start를 눌렀는지 확인해 주세요.',[[btn('🔄 다시 입력','mf:begin')]]);return true;}
     const code='GA-'+randomBytes(4).toString('hex').toUpperCase();const now=Date.now();
     run("INSERT INTO match_requests(code,owner,guest,status,created,expires,updated) VALUES(?,?,?,'selecting',?,?,?)",code,user,match.id,now,now+mins()*60000,now);
-    send(user,'👤 상대방 확인\n━━━━━━━━━━━━━━\n이름: '+(match.name||'-')+'\n아이디: @'+match.username+'\n\n이 상대방에게 무료 대전을 신청하시겠습니까?',[[btn('✅ 확인','mf:confirm:'+code),btn('❌ 취소','mf:cancel:'+code)]]);
+    send(user,'👤 상대방 확인\n━━━━━━━━━━━━━━\n이름: '+(match.name||'-')+'\n아이디: @'+match.username+'\n\n이 상대방에게 대전을 신청하시겠습니까?',[[btn('✅ 확인','mf:confirm:'+code),btn('❌ 취소','mf:cancel:'+code)]]);
     return true;
   }
   function chooseGame(user,code){const r=get(code);if(!r||r.owner!==user||r.status!=='selecting')return;send(user,'🎮 '+code+'\n대전 게임을 선택해 주세요.',Object.keys(games).filter(g=>options.gameEnabled?.(g)!==false).map(g=>[btn(g+' '+games[g][0],'mf:game:'+code+':'+g)]));}
   function request(user,code){const r=get(code);if(!r||r.owner!==user||r.status!=='selecting'||!r.guest)return;const now=Date.now();run("UPDATE match_requests SET status='pending',expires=?,updated=? WHERE code=?",now+mins()*60000,now,code);
     send(r.owner,'📨 매치 신청서를 보냈습니다.\n━━━━━━━━━━━━━━\n매치: '+code+'\n상대방: '+name(r.guest)+'\n'+r.game+' '+r.rounds+'판 · '+modes[r.mode]+'\n\n상대방 수락을 기다리고 있습니다.',[[btn('❌ 신청 취소','mf:cancel:'+code)]]);
-    send(r.guest,'⚔️ 1:1 무료 대전 신청\n━━━━━━━━━━━━━━\n매치 코드: '+code+'\n신청자: '+name(r.owner)+'\n게임: '+r.game+' · '+modes[r.mode]+' · '+r.rounds+'판\n\n'+mins()+'분 안에 수락해 주세요.',[[btn('✅ 수락','mf:accept:'+code),btn('❌ 거절','mf:reject:'+code)]]);
+    send(r.guest,'⚔️ 1:1 대전 신청\n━━━━━━━━━━━━━━\n매치 코드: '+code+'\n신청자: '+name(r.owner)+'\n게임: '+r.game+' · '+modes[r.mode]+' · '+r.rounds+'판\n'+stakeLabel(r)+'\n\n'+mins()+'분 안에 수락해 주세요.',[[btn('✅ 수락','mf:accept:'+code),btn('❌ 거절','mf:reject:'+code)]]);
   }
   function createPublic(user){const active=one("SELECT 1 FROM match_requests WHERE owner=? AND status IN ('selecting','public','pending','room_pending','room_ready','playing')",user);if(active){send(user,'진행 중인 매치가 있습니다.',[[btn('내 경기','mf:mine')]]);return;}
     const code='GA-'+randomBytes(4).toString('hex').toUpperCase(),now=Date.now();
     run("INSERT INTO match_requests(code,owner,status,created,expires,updated) VALUES(? ,?,'selecting',?,?,?)",code,user,now,now+mins()*60000,now);
     chooseGame(user,code);
   }
-  function lobby(user){const rows=all("SELECT * FROM match_requests WHERE status='public' AND expires>? ORDER BY created DESC LIMIT 15",Date.now());send(user,'🏛 GLORY ARENA 공개 매치 대기실\n\n원하는 경기의 참가 신청 버튼을 누르세요. 개설자의 수락 후 비공개 대전방을 생성합니다.\n현재 대기 중: '+rows.length+'건',[[btn('➕ 내 매치 대기 등록','mf:public')],[btn('🔄 대기 목록 새로고침','mf:lobby'),btn('🏠 메인 메뉴','mf:home')]]);if(!rows.length){send(user,'현재 참가 가능한 매치가 없습니다. 매치 대기를 등록해 다른 회원의 신청을 받아보세요.');return;}for(const r of rows){const remaining=Math.max(1,Math.ceil((r.expires-Date.now())/60000));send(user,'⏳ '+r.code+'\n개설자: '+name(r.owner)+'\n종목: '+r.game+' · '+modes[r.mode]+' · '+r.rounds+'판\n남은 대기 시간: 약 '+remaining+'분',r.owner===user?[[btn('❌ 내 대기 취소','mf:cancel:'+r.code)]]:[[btn('⚔ 이 매치에 참가 신청','mf:join:'+r.code)]]);}}
+  function lobby(user){const rows=all("SELECT * FROM match_requests WHERE status='public' AND expires>? ORDER BY created DESC LIMIT 15",Date.now());send(user,'🏛 GLORY ARENA 공개 매치 대기실\n\n원하는 경기의 참가 신청 버튼을 누르세요. 개설자의 수락 후 비공개 대전방을 생성합니다.\n현재 대기 중: '+rows.length+'건',[[btn('➕ 내 매치 대기 등록','mf:public')],[btn('🔄 대기 목록 새로고침','mf:lobby'),btn('🏠 메인 메뉴','mf:home')]]);if(!rows.length){send(user,'현재 참가 가능한 매치가 없습니다. 매치 대기를 등록해 다른 회원의 신청을 받아보세요.');return;}for(const r of rows){const remaining=Math.max(1,Math.ceil((r.expires-Date.now())/60000));send(user,'⏳ '+r.code+'\n개설자: '+name(r.owner)+'\n종목: '+r.game+' · '+modes[r.mode]+' · '+r.rounds+'판\n'+stakeLabel(r)+'\n남은 대기 시간: 약 '+remaining+'분',r.owner===user?[[btn('❌ 내 대기 취소','mf:cancel:'+r.code)]]:[[btn('⚔ 이 매치에 참가 신청','mf:join:'+r.code)]]);}}
   function mine(user){const rows=all("SELECT * FROM match_requests WHERE (owner=? OR guest=?) ORDER BY created DESC LIMIT 10",user,user);if(!rows.length){send(user,'아직 신청한 대전이 없습니다.',[[btn('⚔ 매치 개설','mf:begin')]]);return;}for(const r of rows){const labels={selecting:'조건 설정',public:'공개 대기',pending:'수락 대기',room_pending:'그룹 생성',room_ready:'입장 및 준비',playing:'경기 진행',finished:'경기 종료',cancelled:'취소',expired:'만료',failed:'오류'};send(user,r.code+' · '+(labels[r.status]||r.status)+'\n'+r.game+' '+r.rounds+'판\n상대방: '+(r.guest?name(r.guest):'미정'),['room_ready','playing'].includes(r.status)?[[btn('🔄 대전방 재입장·상태 복구','mf:resume:'+r.code)]]:undefined);}}
   function groupReady(code,room){const r=get(code);if(!r||r.status!=='room_pending'||!room?.chat||!room?.linkOwner||!room?.linkGuest)return;
     const id=Number(run("INSERT INTO matches(chat,owner,guest,game,mode,rounds,state) VALUES(?,?,?,?,?,?,'waiting')",room.chat,r.owner,r.guest,r.game,r.mode,r.rounds).lastInsertRowid);
     run("UPDATE match_requests SET status='room_ready',room_code=COALESCE(room_code,?),match_id=?,updated=? WHERE code=?",room.code,id,Date.now(),code);
-    send(room.chat,text('room_notice','📌 GLORY ARENA 경기 안내\n\n양측 모두 공지 확인 후 준비 완료를 눌러주세요.\n입금, 보증금, 수수료 없이 진행되는 무료 대전입니다.\n승패는 공식 텔레그램 이모지 결과로 기록됩니다.')+'\n\n매치: '+code+'\n'+r.game+' '+r.rounds+'판',[[btn('✅ 공지 확인','mf:notice:'+code)],[btn('🎮 준비 완료','mf:ready:'+code)],[btn('🛑 중도 종료 요청','mf:stop:'+code)]]);
+    send(room.chat,text('room_notice','📌 GLORY ARENA 경기 안내\n\n양측 모두 공지 확인 후 준비 완료를 눌러주세요.\n승패는 공식 텔레그램 이모지 결과로 기록됩니다.')+'\n\n매치: '+code+'\n'+r.game+' '+r.rounds+'판\n'+stakeLabel(r),[[btn('✅ 공지 확인','mf:notice:'+code)],[btn('🎮 준비 완료','mf:ready:'+code)],[btn('🛑 중도 종료 요청','mf:stop:'+code)]]);
     send(r.owner,'🚪 '+code+' 전용 그룹 입장 링크입니다.\n진행 안내와 공지 확인은 그룹 안에서 이루어집니다.',[[{text:'🚪 그룹 입장',url:room.linkOwner}]]);
     send(r.guest,'🚪 '+code+' 전용 그룹 입장 링크입니다.\n진행 안내와 공지 확인은 그룹 안에서 이루어집니다.',[[{text:'🚪 그룹 입장',url:room.linkGuest}]]);
   }
@@ -63,7 +74,15 @@ export function createMatchFlow(db, send, roomService, games, modes, rounds, opt
     const column=user===r.owner?'ready_owner':'ready_guest';
     run('UPDATE match_requests SET '+column+'=1,updated=? WHERE code=?',Date.now(),code);
     const current=get(code);
-    if(current.ready_owner&&current.ready_guest){run("UPDATE match_requests SET status='playing',updated=? WHERE code=?",Date.now(),code);run("UPDATE matches SET state='active',turn=owner WHERE id=? AND state='waiting'",current.match_id);const room=roomService.getByCode(current.room_code);if(room?.chat)options.onMatchStart?.(current.match_id);}
+    if(current.ready_owner&&current.ready_guest){
+      if(current.stake_micro>0){
+        if(!moneyAllowed()){run('UPDATE match_requests SET ready_owner=0,ready_guest=0 WHERE code=?',code);send(chat,'유료 대전이 비활성화되어 경기를 시작할 수 없습니다.');return;}
+        const held=money.deposit(current.match_id,code,current.owner,current.guest,current.stake_micro);
+        if(!held.ok){run('UPDATE match_requests SET ready_owner=0,ready_guest=0 WHERE code=?',code);send(chat,'⚠️ 참가금 예치 실패: 양쪽 회원의 지갑 잔액을 확인해 주세요. 두 명의 준비 상태를 초기화했습니다.');send(current.owner,'참가금 예치 실패. 회원 지갑 잔액 또는 경기 조건을 확인해 주세요.');send(current.guest,'참가금 예치 실패. 회원 지갑 잔액 또는 경기 조건을 확인해 주세요.');return;}
+        send(chat,'🔒 참가금 예치 완료 · 양측 각각 '+usdt(current.stake_micro)+' USDT\\n승리금은 총 판돈의 97%, 무승부·중단 시 전액 반환됩니다.');
+      }
+      run("UPDATE match_requests SET status='playing',updated=? WHERE code=?",Date.now(),code);run("UPDATE matches SET state='active',turn=owner WHERE id=? AND state='waiting'",current.match_id);const room=roomService.getByCode(current.room_code);if(room?.chat)options.onMatchStart?.(current.match_id);
+    }
     else send(chat,'✅ '+name(user)+' 님 준비 완료. 상대방 준비를 기다리고 있습니다.');
   }
   function requestStop(user,chat,code){
@@ -160,9 +179,15 @@ export function createMatchFlow(db, send, roomService, games, modes, rounds, opt
     if(op==='confirm'&&r.owner===user&&r.status==='selecting'){chooseGame(user,code);return true;}
     if(op==='game'&&r.owner===user&&r.status==='selecting'&&games[p[3]]&&options.gameEnabled?.(p[3])!==false){run('UPDATE match_requests SET game=?,mode=?,updated=? WHERE code=?',p[3],'wins',Date.now(),code);send(user,'경기 방식을 선택해 주세요.',Object.entries(modes).filter(([k])=>r.game==='🎲'||!isSpecialMode(k)).map(([k,v])=>[btn(v,'mf:mode:'+code+':'+k)]));return true;}
     if(op==='mode'&&r.owner===user&&r.status==='selecting'&&modes[p[3]]&&(!isSpecialMode(p[3])||r.game==='🎲')){run('UPDATE match_requests SET mode=?,updated=? WHERE code=?',p[3],Date.now(),code);send(user,'경기 횟수를 선택하세요.',[rounds.map(n=>btn(n+'판','mf:round:'+code+':'+n))]);return true;}
-    if(op==='round'&&r.owner===user&&r.status==='selecting'&&rounds.includes(Number(p[3]))){run('UPDATE match_requests SET rounds=?,updated=? WHERE code=?',Number(p[3]),Date.now(),code);send(user,'✅ 최종 확인\n'+code+'\n'+r.game+' · '+modes[r.mode]+' · '+Number(p[3])+'판\n'+(r.guest?'상대: '+name(r.guest):'공개 대기실에 등록'),[[btn(r.guest?'📩 상대에게 신청':'🏛 대기실에 공개','mf:submit:'+code),btn('❌ 취소','mf:cancel:'+code)]]);return true;}
-    if(op==='submit'&&r.owner===user&&r.status==='selecting'){if(r.guest)request(user,code);else{run("UPDATE match_requests SET status='public',source='public',expires=?,updated=? WHERE code=?",Date.now()+mins()*60000,Date.now(),code);send(user,'✅ 공개 매치 대기 등록 완료!\n\n매치 코드: '+code+'\n조건: '+r.game+' · '+modes[r.mode]+' · '+r.rounds+'판\n\n다른 회원이 대기실에서 신청하면 수락·거절 버튼을 보내드립니다.',[[btn('🏛 대기실 확인','mf:lobby')],[btn('❌ 매치 취소','mf:cancel:'+code)]]);}return true;}
-    if(op==='join'&&r.status==='public'&&r.owner!==user&&Date.now()<=r.expires){const applied=run("UPDATE match_requests SET guest=?,status='pending',updated=? WHERE code=? AND status='public'",user,Date.now(),code);if(applied.changes){send(r.owner,'⚔️ 공개 매치 참가 신청\n━━━━━━━━━━━━━━\n매치 코드: '+r.code+'\n신청자: '+name(user)+'\n조건: '+r.game+' · '+modes[r.mode]+' · '+r.rounds+'판\n\n수락하면 전용 그룹 생성이 시작됩니다.',[[btn('✅ 신청 수락','mf:accept:'+code),btn('❌ 신청 거절','mf:reject:'+code)]]);send(user,'✅ 참가 신청 완료!\n매치: '+code+'\n개설자 '+name(r.owner)+'님의 승인을 기다리고 있습니다.',[[btn('❌ 내 신청 철회','mf:withdraw:'+code)]]);}else send(user,'이미 다른 회원이 신청 중입니다. 대기실에서 다른 매치를 확인해 주세요.',[[btn('🏛 대기실','mf:lobby')]]);return true;}
+    if(op==='round'&&r.owner===user&&r.status==='selecting'&&rounds.includes(Number(p[3]))){run('UPDATE match_requests SET rounds=?,updated=? WHERE code=?',Number(p[3]),Date.now(),code);offerStake(user,code);return true;}
+    if(op==='stake'&&r.owner===user&&r.status==='selecting'&&/^(0|1|5|10|50|100)$/.test(p[3]||'')){
+      const st=Number(p[3]);if(st>0&&!moneyAllowed()){send(user,'현재 유료 대전을 이용할 수 없습니다. 무료 대전을 선택해 주세요.');return true;}
+      run('UPDATE match_requests SET stake_micro=?,updated=? WHERE code=?',st*1000000,Date.now(),code);
+      const latest=get(code);
+      send(user,'✅ 최종 확인\n'+code+'\n'+latest.game+' · '+modes[latest.mode]+' · '+latest.rounds+'판\n'+stakeLabel(latest)+'\n'+(latest.guest?'상대: '+name(latest.guest):'공개 대기실에 등록'),[[btn(latest.guest?'📩 상대에게 신청':'🏛 대기실에 공개','mf:submit:'+code),btn('❌ 취소','mf:cancel:'+code)]]);return true;
+    }
+    if(op==='submit'&&r.owner===user&&r.status==='selecting'&&r.stake_micro>=0&&(r.stake_micro===0||moneyAllowed())){if(r.guest)request(user,code);else{run("UPDATE match_requests SET status='public',source='public',expires=?,updated=? WHERE code=?",Date.now()+mins()*60000,Date.now(),code);send(user,'✅ 공개 매치 대기 등록 완료!\n\n매치 코드: '+code+'\n조건: '+r.game+' · '+modes[r.mode]+' · '+r.rounds+'판\n'+stakeLabel(r)+'\n\n다른 회원이 대기실에서 신청하면 수락·거절 버튼을 보내드립니다.',[[btn('🏛 대기실 확인','mf:lobby')],[btn('❌ 매치 취소','mf:cancel:'+code)]]);}return true;}
+    if(op==='join'&&r.status==='public'&&r.owner!==user&&Date.now()<=r.expires){const applied=run("UPDATE match_requests SET guest=?,status='pending',updated=? WHERE code=? AND status='public'",user,Date.now(),code);if(applied.changes){send(r.owner,'⚔️ 공개 매치 참가 신청\n━━━━━━━━━━━━━━\n매치 코드: '+r.code+'\n신청자: '+name(user)+'\n조건: '+r.game+' · '+modes[r.mode]+' · '+r.rounds+'판\n'+stakeLabel(r)+'\n\n수락하면 전용 그룹 생성이 시작됩니다.',[[btn('✅ 신청 수락','mf:accept:'+code),btn('❌ 신청 거절','mf:reject:'+code)]]);send(user,'✅ 참가 신청 완료!\n매치: '+code+'\n개설자 '+name(r.owner)+'님의 승인을 기다리고 있습니다.',[[btn('❌ 내 신청 철회','mf:withdraw:'+code)]]);}else send(user,'이미 다른 회원이 신청 중입니다. 대기실에서 다른 매치를 확인해 주세요.',[[btn('🏛 대기실','mf:lobby')]]);return true;}
     if(op==='accept'&&r.status==='pending'&&r.guest&&((r.source==='public'&&r.owner===user)||(r.source==='direct'&&r.guest===user))){if(Date.now()>r.expires){expireOne(r);return true;}
       if(!roomService.connected()){send(user,'운영자 대전방 생성 계정이 연결되지 않았습니다.');return true;}
       const x=run("UPDATE match_requests SET status='room_pending',updated=? WHERE code=? AND status='pending'",Date.now(),code);
@@ -214,7 +239,16 @@ export function createMatchFlow(db, send, roomService, games, modes, rounds, opt
     if(now.owner_vote==='yes'&&now.guest_vote==='yes'){
       const last=one("SELECT * FROM matches WHERE id=? AND state='finished'",r.match_id);
       if(!last){send(chat,'이전 경기 결과를 확인할 수 없습니다. 운영자에게 문의해 주세요.');return;}
+      if(r.stake_micro>0){
+        if(!moneyAllowed()||money.balance(r.owner)<BigInt(r.stake_micro)||money.balance(r.guest)<BigInt(r.stake_micro)){
+          send(chat,'⚠️ 재대전 참가금이 부족하거나 유료 매치가 중단되었습니다. 이번 경기는 종료하고 새 매치를 만들어 주세요.');closeDecision(r,'declined');return;
+        }
+      }
       const next=Number(run("INSERT INTO matches(chat,owner,guest,game,mode,rounds,state,turn,round,a,b) VALUES(?,?,?,?,?,?,'active',?,1,0,0)",room.chat,r.owner,r.guest,r.game,r.mode,r.rounds,r.owner).lastInsertRowid);
+      if(r.stake_micro>0){
+        const held=money.deposit(next,code,r.owner,r.guest,r.stake_micro);
+        if(!held.ok){run("UPDATE matches SET state='cancelled' WHERE id=?",next);send(chat,'재대전 참가금 예치에 실패했습니다. 새 매치를 생성해 주세요.');closeDecision(r,'declined');return;}
+      }
       run("UPDATE match_requests SET status='playing',match_id=?,updated=? WHERE code=?",next,Date.now(),code);
       run("UPDATE match_continue_votes SET state='rematched',updated=? WHERE code=?",Date.now(),code);
       roomService.reopen(r.room_code);
