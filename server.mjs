@@ -226,6 +226,7 @@ if(['/start','/help'].includes(t)||full==='🏠 메인 메뉴'){if(m.chat.type==
 if(full==='📖 이용 안내'){matchFlow.tutorial(cid);return;}
 if(m.chat.type==='private'&&['/wallet','/deposit','/balance'].includes(t)){walletMenu(cid,m.from.id);return;}
 if(m.chat.type==='private'&&t==='/deposits'){walletHistory(cid,m.from.id);return;}
+if(m.chat.type==='private'&&one("SELECT 1 FROM match_inputs WHERE user_id=? AND kind LIKE 'stake:%'",m.from.id)&&matchFlow.onText(m.from.id,full))return;
 if(m.chat.type==='private'&&handleWalletInput(cid,m.from.id,full))return;
 if(m.chat.type==='private'&&matchFlow.onText(m.from.id,full))return;
 if(m.chat.type!=='private'&&['/resume','/status'].includes(t)){const current=one("SELECT id FROM matches WHERE chat=? AND state='active' ORDER BY id DESC LIMIT 1",cid);if(current)matchBoard.queueMatch(current.id);else send(cid,'현재 진행 중인 경기가 없습니다.');void drain();return;}
