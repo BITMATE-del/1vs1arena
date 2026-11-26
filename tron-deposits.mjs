@@ -51,6 +51,7 @@ export function createTronDeposits(db,send,options={}){
   function assign(user,address){
     if(!Number.isSafeInteger(user)||user<=0||!one('SELECT id FROM arena_users WHERE id=?',user))return false;
     if(!validTronAddress(address))return false;
+    if(db.prepare("SELECT value FROM treasury_settings WHERE key='address'").get()?.value===address)return false;
     // Reassignment is forbidden once funds have arrived; operators must use a separate reconciliation path.
     if(one('SELECT 1 FROM tron_deposits WHERE user_id=? LIMIT 1',user))return false;
     if(one('SELECT user_id FROM tron_deposit_addresses WHERE address=? AND user_id!=?',address,user))return false;
@@ -122,6 +123,7 @@ export function createTronDeposits(db,send,options={}){
     running=true;let credited=0,checked=0;
     try{
       for(const row of all('SELECT * FROM tron_deposit_addresses ORDER BY user_id LIMIT 250')){
+        if(db.prepare("SELECT value FROM treasury_settings WHERE key='address'").get()?.value===row.address){log('shared_address_conflict','Shared treasury excluded from legacy per-user watcher');continue;}
         try{credited+=await scan(row);checked++;}catch(e){lastError=String(e.message||e).slice(0,100);log('scan_error','user='+row.user_id+' '+lastError);}
       }
       lastChecked=now();return {active:true,checked,credited};
