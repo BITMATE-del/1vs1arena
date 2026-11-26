@@ -423,7 +423,7 @@ if(tab==='readiness'){
   adminRecipients:one('SELECT COUNT(*) n FROM bot_admins WHERE enabled=1').n,
   tronKey:Boolean(process.env.TRONGRID_API_KEY),
   treasuryAddress:sharedWallet.treasury(),
-  sharedDepositsEnabled:sharedWallet.status().enabled
+  sharedDepositsEnabled:sharedWallet.status().enabled,internalSettlementEnabled:setting('paid_matches_enabled','1')==='1'
  });
  content='<section><h2>운영 기능 최종 점검</h2><p>서버의 현재 설정과 DB 상태를 확인한 결과입니다. 단위 테스트 통과와 실제 고객 입출금 거래 성공은 서로 다른 확인 항목입니다.</p>'+
  table(['기능','상태','상세'],serviceStatus.checks.map(x=>tr([x.label,x.ok?'설정 확인':'조치 필요',x.detail])))+'</section>'+
@@ -440,7 +440,7 @@ content='<section><h2>경기별 판정 및 환급 정책</h2><p>승패 확정: �
 '<section><h2>실제 내부 USDT 경기 정산</h2><p>양쪽 회원의 실제 USDT 지갑 잔액에서 참가금 예치 → 경기 종료 후 승리 시 판돈의 97% 지급, 무승부/중도 종료 시 각자 참가금 100% 환급합니다. 수수료는 내부 운영 원장에 누적됩니다.</p><p>경기별 예치 및 정산은 DB 원자적 트랜잭션, 중복 이벤트 차단, 불변 원장으로 처리합니다. 출금은 별도 온체인 송금 연동이 필요합니다.</p><p>현재 유료 경기: '+(setting('paid_matches_enabled','1')==='1'?'신규 접수 허용':'신규 접수 중단')+'</p>'+form('paid_matches_toggle','',valueField(setting('paid_matches_enabled','1')==='1'?'0':'1'),setting('paid_matches_enabled','1')==='1'?'신규 유료 경기 중단':'신규 유료 경기 활성화')+'</section>'+
 '<div class="grid">'+[['미정산 예치 경기',financial.open],['실제 정산 완료 경기',financial.settled],['누적 경기 수수료',usdtDisplay(financial.fees)+' USDT']].map(([k,v])=>'<section><small>'+esc(k)+'</small><div class="metric">'+esc(v)+'</div></section>').join('')+'</div>'+
 '<section><h2>실제 내부 잔액 변동 원장</h2>'+table(['경기','회원 ID','종류','잔액 변동 (USDT)','시각'],moneyRows.map(m=>tr([m.match_id,m.user_id,m.kind,(m.delta_micro>0?'+':'-')+usdtDisplay(Math.abs(m.delta_micro)),date(m.created)])))+'</section>'+
-'<section><h2>읽기 전용 정산 감사 기록</h2><p>경기번호별 최초 판정만 등록하고 같은 경기의 중복 기록을 차단합니다. 이벤트 변경 및 삭제는 DB에서 금지됩니다. 감사 해시로 기록 내용의 일치 여부를 확인합니다.</p>'+table(['경기 ID','기록 시각','경기 결과','정산 정책','승자 ID','수수료율','변경 검증','금전 처리'],entries.map(e=>tr([e.match_id,date(e.created),e.match_state,e.decision==='refund_both'?'전액 환급 예정 · '+e.reason:'승자 지급 예정',e.winner_id||'-',(e.fee_bps/100)+'%',settlementJournal.verify(e)?'정상':'검증 실패','시뮬레이션 · 미집행'])))+'</section>';
+'<section><h2>읽기 전용 정산 감사 기록</h2><p>경기번호별 최초 판정만 등록하고 같은 경기의 중복 기록을 차단합니다. 이벤트 변경 및 삭제는 DB에서 금지됩니다. 감사 해시로 기록 내용의 일치 여부를 확인합니다.</p>'+table(['경기 ID','기록 시각','경기 결과','정산 정책','승자 ID','수수료율','변경 검증','금전 처리'],entries.map(e=>tr([e.match_id,date(e.created),e.match_state,e.decision==='refund_both'?'전액 환급 예정 · '+e.reason:'승자 지급 예정',e.winner_id||'-',(e.fee_bps/100)+'%',settlementJournal.verify(e)?'정상':'검증 실패',one('SELECT decision FROM money_settlements WHERE match_id=?',e.match_id)?'내부 USDT 정산 완료':'금전 미집행'])))+'</section>';
 }
 if(tab==='games'){
  const sample=projectPrize(100000000n);
