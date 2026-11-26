@@ -48,7 +48,10 @@ export function createBotAdmin(db,enqueue,options={}){
      db.exec('SAVEPOINT admin_notify');
      try{
        const change=run('INSERT OR IGNORE INTO bot_admin_notice(key,admin_id,created) VALUES(?,?,?)',key,a.user_id,now());
-       if(change.changes){enqueue('sendMessage',{chat_id:a.user_id,text});count++;}
+       if(change.changes){
+         const buttons=event.type==='withdrawal'&&Number.isSafeInteger(event.withdrawalId)?{reply_markup:{inline_keyboard:[[{text:'✅ 승인 · 수동 송금 대기',callback_data:'wo:approve:'+event.withdrawalId},{text:'❌ 거절 · 잔액 환급',callback_data:'wo:reject:'+event.withdrawalId}]]}}:{};
+         enqueue('sendMessage',{chat_id:a.user_id,text,...buttons});count++;
+       }
        db.exec('RELEASE admin_notify');
      }catch(e){db.exec('ROLLBACK TO admin_notify');db.exec('RELEASE admin_notify');throw e;}
    }
@@ -65,7 +68,7 @@ export function createBotAdmin(db,enqueue,options={}){
    lines.push('','📤 최근 출금 신청');
    if(!withdrawals.length)lines.push('내역 없음');
    else for(const v of withdrawals)lines.push('#'+v.id+' · '+displayUser(v.user_id)+' · '+usdtDisplay(v.amount_micro)+' USDT · '+v.status);
-   lines.push('','⚠️ 미확인 입금: '+unmatches+'건','입출금 승인 및 지갑 설정 변경은 웹 관리자에서만 가능합니다.');
+   lines.push('','⚠️ 미확인 입금: '+unmatches+'건','출금은 관리자 봇 버튼으로 승인/거절할 수 있습니다. 승인 후 실제 송금 및 TXID 등록은 웹 관리자에서 처리합니다.');
    return lines.join('\n');
  }
  return {setAdmin,isAdmin,list,notify,inbox,format};
