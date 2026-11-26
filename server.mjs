@@ -15,6 +15,7 @@ import {createBotAdmin} from './bot-admin.mjs';
 import {projectPrize,PLATFORM_FEE_BPS,FEE_POLICY_VERSION} from './fee-policy.mjs';
 import {createSettlementJournal} from './settlement-journal.mjs';
 import {summarizeReadiness,OFFICIAL_GAMES} from './readiness.mjs';
+import {createMoneyEngine} from './money-engine.mjs';
 import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
@@ -45,6 +46,7 @@ const settlementJournal=createSettlementJournal(db);
 const tronDeposits=createTronDeposits(db,(user,message)=>send(user,message));
 const botAdmin=createBotAdmin(db,enqueue);
 const sharedWallet=createSharedWallet(db,(user,message)=>send(user,message),{onEvent:event=>botAdmin.notify(event)});
+const moneyEngine=createMoneyEngine(db);
 const pendingWalletInput=new Map();
 
 db.exec("CREATE TABLE IF NOT EXISTS arena_users(id INTEGER PRIMARY KEY, name TEXT NOT NULL, username TEXT NOT NULL DEFAULT '', first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL, blocked INTEGER NOT NULL DEFAULT 0, note TEXT NOT NULL DEFAULT ''); CREATE TABLE IF NOT EXISTS arena_rooms(id INTEGER PRIMARY KEY, title TEXT NOT NULL, last_seen INTEGER NOT NULL, enabled INTEGER NOT NULL DEFAULT 1); CREATE TABLE IF NOT EXISTS admin_audit(id INTEGER PRIMARY KEY, at INTEGER NOT NULL, action TEXT NOT NULL, target TEXT NOT NULL); CREATE TABLE IF NOT EXISTS arena_settings(key TEXT PRIMARY KEY,value TEXT NOT NULL)");
@@ -240,7 +242,7 @@ const roomService=createRoomService(db,telegramAuth,username,send);
 const matchBoard=createMatchBoard(db,enqueue);
 let matchFlow;
 const matchWatch=createMatchWatch(db,send,{getConfig:(k)=>setting(k,''),onTimeout:(id)=>matchFlow?.timeoutMatch(id)});
-matchFlow=createMatchFlow(db,send,roomService,games,modes,rounds,{gameEnabled,onMatchStart:id=>{matchWatch.arm(id);matchBoard.queueMatch(id);},onMatchStopped:id=>{matchWatch.touch(id);matchBoard.queueMatch(id);},onCloseFailed:(id,code)=>matchWatch.incident('room_close_failed',id||0,'그룹 종료 실패 '+code)});
+matchFlow=createMatchFlow(db,send,roomService,games,modes,rounds,{gameEnabled,money:moneyEngine,paidMatchesEnabled:()=>setting('paid_matches_enabled','1')==='1',onMatchStart:id=>{matchWatch.arm(id);matchBoard.queueMatch(id);},onMatchEnd:id=>{const m=one('SELECT * FROM matches WHERE id=?',id);if(m){const r=moneyEngine.settle(m);if(r.ok&&!r.reused){for(const u of [m.owner,m.guest])if(u)send(u,r.decision==='refund'?'↩️ 경기 종료: 참가금 전액 환급 완료 · 수수료 0%':'🏆 경기 종료: 내부 USDT 잔액 정산 완료 · 수수료 3%');}}},onMatchStopped:id=>{matchWatch.touch(id);matchBoard.queueMatch(id);},onCloseFailed:(id,code)=>matchWatch.incident('room_close_failed',id||0,'그룹 종료 실패 '+code)});
 matchWatch.sync();
 const adminAttempts=new Map();
 const adminGlobalAttempts={count:0,until:0};
@@ -282,6 +284,11 @@ if(act==='bot_admin_test'){
  const result=botAdmin.isAdmin(user);
  if(result)send(user,'🔔 GLORY ARENA 봇 관리자 알림 테스트\n이 메시지가 보이면 관리자로 등록된 개인 채팅에 정상 발송 중입니다.');
  res.writeHead(303,{location:'/admin?tab=bot_admin&saved='+Number(result)}).end();void drain();return true;
+}
+if(act==='paid_matches_toggle'&&['0','1'].includes(value)){
+ run("INSERT INTO arena_settings(key,value) VALUES('paid_matches_enabled',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",value);
+ run('INSERT INTO admin_audit(at,action,target) VALUES(?,?,?)',Date.now(),'paid_matches_toggle',value);
+ res.writeHead(303,{location:'/admin?tab=settlement&saved=1'}).end();return true;
 }
 if(act==='enable_free_games'){
  const count=OFFICIAL_GAMES.reduce((n,g)=>n+Number(gameEnabled(g)),0);
@@ -425,14 +432,19 @@ if(tab==='readiness'){
  '<section><h2>필수 운영 확인</h2><p>자동 입금은 공용 지갑 주소 등록과 활성화 변수 설정, 실거래 소액 검증이 필요합니다. 자동 출금은 서명 서비스와 온체인 거래 검증이 구현되지 않았습니다. 승리금·환급금의 실제 이동은 금전 정산 엔진이 없으므로 활성화할 수 없습니다.</p></section>';
 }
 if(tab==='settlement'){
+const financial=moneyEngine.summary();
+const moneyRows=moneyEngine.ledger();
 const stat=settlementJournal.summary(),entries=settlementJournal.entries();
-content='<section><h2>경기별 판정 및 환급 정책</h2><p>승패 확정: 총 참가금의 3%를 수수료로 산정하며 나머지 97%를 승리자에게 배정하는 계산 정책입니다. 동액 참가인 경우 1.94배 지급 예정입니다.</p><p>무승부: 양쪽 참가금 전액 반환 · 수수료 0%. 경기 시작 전 취소·상호 동의 중단·시간초과 중단·관리자 강제 종료: 양측 참가금 전액 반환 · 수수료 0%. 완료된 승패 기록은 이후 방 종료와 관계없이 유지됩니다.</p><p><strong>현재는 계산 규칙과 감사 기록만 구현되며, 회원 잔액 차감·환급·승리금 지급은 실행되지 않습니다.</strong> 역사적 무료 게임은 수수료 정책 적용에서 제외됩니다.</p></section>'+
+content='<section><h2>경기별 판정 및 환급 정책</h2><p>승패 확정: 총 참가금의 3%를 수수료로 산정하며 나머지 97%를 승리자에게 배정하는 계산 정책입니다. 동액 참가인 경우 1.94배 지급 예정입니다.</p><p>무승부: 양쪽 참가금 전액 반환 · 수수료 0%. 경기 시작 전 취소·상호 동의 중단·시간초과 중단·관리자 강제 종료: 양측 참가금 전액 반환 · 수수료 0%. 완료된 승패 기록은 이후 방 종료와 관계없이 유지됩니다.</p><p><strong>유료 경기를 선택하고 양측 준비를 마치면 실제 내부 지갑 잔액에서 참가금이 예치·정산됩니다. 기존 무료 경기에는 금전 처리되지 않습니다.</strong> 역사적 무료 게임은 수수료 정책 적용에서 제외됩니다.</p></section>'+
 '<div class="grid">'+[['기록된 종료 경기',stat.total],['무승부·중단 환급 대상',stat.refunds],['승자 정산 예정',stat.winners],['과거 기록 제외 경계',stat.cutoff]].map(([k,v])=>'<section><small>'+esc(k)+'</small><div class="metric">'+esc(v)+'</div></section>').join('')+'</div>'+
+'<section><h2>실제 내부 USDT 경기 정산</h2><p>양쪽 회원의 실제 USDT 지갑 잔액에서 참가금 예치 → 경기 종료 후 승리 시 판돈의 97% 지급, 무승부/중도 종료 시 각자 참가금 100% 환급합니다. 수수료는 내부 운영 원장에 누적됩니다.</p><p>경기별 예치 및 정산은 DB 원자적 트랜잭션, 중복 이벤트 차단, 불변 원장으로 처리합니다. 출금은 별도 온체인 송금 연동이 필요합니다.</p><p>현재 유료 경기: '+(setting('paid_matches_enabled','1')==='1'?'신규 접수 허용':'신규 접수 중단')+'</p>'+form('paid_matches_toggle','',valueField(setting('paid_matches_enabled','1')==='1'?'0':'1'),setting('paid_matches_enabled','1')==='1'?'신규 유료 경기 중단':'신규 유료 경기 활성화')+'</section>'+
+'<div class="grid">'+[['미정산 예치 경기',financial.open],['실제 정산 완료 경기',financial.settled],['누적 경기 수수료',usdtDisplay(financial.fees)+' USDT']].map(([k,v])=>'<section><small>'+esc(k)+'</small><div class="metric">'+esc(v)+'</div></section>').join('')+'</div>'+
+'<section><h2>실제 내부 잔액 변동 원장</h2>'+table(['경기','회원 ID','종류','잔액 변동 (USDT)','시각'],moneyRows.map(m=>tr([m.match_id,m.user_id,m.kind,(m.delta_micro>0?'+':'')+usdtDisplay(m.delta_micro),date(m.created)])))+'</section>'+
 '<section><h2>읽기 전용 정산 감사 기록</h2><p>경기번호별 최초 판정만 등록하고 같은 경기의 중복 기록을 차단합니다. 이벤트 변경 및 삭제는 DB에서 금지됩니다. 감사 해시로 기록 내용의 일치 여부를 확인합니다.</p>'+table(['경기 ID','기록 시각','경기 결과','정산 정책','승자 ID','수수료율','변경 검증','금전 처리'],entries.map(e=>tr([e.match_id,date(e.created),e.match_state,e.decision==='refund_both'?'전액 환급 예정 · '+e.reason:'승자 지급 예정',e.winner_id||'-',(e.fee_bps/100)+'%',settlementJournal.verify(e)?'정상':'검증 실패','시뮬레이션 · 미집행'])))+'</section>';
 }
 if(tab==='games'){
  const sample=projectPrize(100000000n);
- content='<section><h2>경기 정산 수수료 정책</h2><p>정책 버전: '+esc(FEE_POLICY_VERSION)+'</p><p><strong>총 판돈의 '+(PLATFORM_FEE_BPS/100)+'% 수수료</strong> · 양쪽이 같은 금액을 참가하는 경우 승리자 지급 비율 1.94배입니다.</p><p>예시: 양측 100 USDT씩, 합계 200 USDT → 수수료 '+usdtDisplay(sample.fee)+' USDT → 승리자 지급 예정 '+usdtDisplay(sample.winnerPayout)+' USDT.</p><p>현재 정책은 시뮬레이션·운영 설계 정보이며 실제 경기 입장금 차감, 승리금 적립, USDT 송금은 <strong>연결하지 않았습니다</strong>. 기존 무료 경기와 회원 지갑 잔액에 영향을 주지 않습니다. 무승부·중도 종료는 수수료 0%와 양측 전액 반환 정책으로 정의되었으나 실제 잔액 이동은 미구현입니다.</p></section>';
+ content='<section><h2>경기 정산 수수료 정책</h2><p>정책 버전: '+esc(FEE_POLICY_VERSION)+'</p><p><strong>총 판돈의 '+(PLATFORM_FEE_BPS/100)+'% 수수료</strong> · 양쪽이 같은 금액을 참가하는 경우 승리자 지급 비율 1.94배입니다.</p><p>예시: 양측 100 USDT씩, 합계 200 USDT → 수수료 '+usdtDisplay(sample.fee)+' USDT → 승리자 지급 예정 '+usdtDisplay(sample.winnerPayout)+' USDT.</p><p>유료 대전 참가금 예치 및 경기 종료 후 승리금·환급금의 <strong>내부 USDT 잔액 정산이 연결되어 있습니다</strong>. 실제 블록체인 출금 송금은 별도입니다. 기존 무료 경기와 과거 데이터는 변경하지 않습니다. 무승부·중도 종료는 수수료 0%와 양측 전액 반환 정책으로 정의되었으나 실제 잔액 이동은 미구현입니다.</p></section>';
 }
 if(tab==='games'){content+='<section><h2>신규 매치 접수</h2><p>기존 경기를 유지하면서 신규 경기 개설을 제어합니다.</p>'+form('matches_enabled','',valueField(setting('matches_enabled','1')==='1'?'0':'1'),setting('matches_enabled','1')==='1'?'신규 접수 중단':'신규 접수 허용')+'</section><section><h2>게임별 설정</h2>'+table(['게임','공식 값 범위','신규 개설','관리'],Object.entries(games).map(([g,v])=>tr([g+' '+v[0],'1~'+v[1],gameEnabled(g)?'사용':'중단'],'<td>'+form('game',g,valueField(gameEnabled(g)?'0':'1'),gameEnabled(g)?'비활성화':'활성화')+'</td>')))+'<p>무료 대전만 지원합니다. 슬롯은 원시 값 비교이며 조합 판정은 미구현입니다.</p></section>';}
 if(tab==='bot'){content='<section><h2>연결 정보</h2><p>공식 봇: @'+esc(username)+'<br>웹훅: '+(webhookReady?'정상':'미연결')+'<br>API ID / HASH: '+(process.env.TELEGRAM_API_ID&&process.env.TELEGRAM_API_HASH?'등록 완료':'미등록')+'<br>시작 이미지: '+(one("SELECT value FROM welcome_settings WHERE key='photo'")?.value?'새 봇용 이미지 등록됨':process.env.WELCOME_PHOTO_FILE_ID?'기존 이미지 ID 등록됨 · 새 봇에서 재등록 필요':'미등록')+'<br>마지막 오류: '+esc(lastError||'없음')+'</p><p>그룹 생성 계정의 연결 상태와 전용 방 생성 결과는 텔레그램 계정 관리 메뉴에서 확인하세요. 비밀값은 표시하지 않습니다.</p></section><section><h2>시작 화면 문구</h2>'+form('welcome_caption','', '<textarea name="value" maxlength="900" rows="7" required>'+esc(setting('welcome_caption','⚜️ GLORY ARENA\n승부의 끝, 영광의 시작.\n\n당신의 다음 승부를 시작하세요.\n매치를 개설하거나 대기실에서 상대를 만나보세요.\n\n1vs1 무료 대전 · 텔레그램 공식 게임'))+'</textarea>','문구 저장')+'</section><section><h2>시작 이미지 변경</h2><p>텔레그램 봇을 변경했다면 기존 사진 ID가 무효가 됩니다. 새 봇에서 등록해야 합니다.</p>'+form('banner_generate','','사진 등록 코드 발급')+'</section>';}
@@ -518,6 +530,6 @@ webhookReady=true;console.log('Webhook update accepted',u.update_id);res.writeHe
 }catch(e){console.error('Webhook processing failed',e?.name||'Error',String(e?.message||'unknown').slice(0,180));res.writeHead(500).end();}
 });
 server.listen(port,'0.0.0.0',()=>{console.log('GLORY ARENA HTTP server listening on',port);void register();});
-setInterval(()=>{void drain();void roomService.work();roomService.recover();matchFlow.tick();matchWatch.sync();matchWatch.tick();settlementJournal.reconcile();},5000).unref();
+setInterval(()=>{moneyEngine.reconcile();void drain();void roomService.work();roomService.recover();matchFlow.tick();matchWatch.sync();matchWatch.tick();settlementJournal.reconcile();},5000).unref();
 setInterval(()=>{void tronDeposits.poll().then(r=>{if(r.credited)void drain();}).catch(e=>console.warn('TRON watcher:',String(e.message||e).slice(0,90)));void sharedWallet.poll().then(r=>{if(r.credited)void drain();}).catch(e=>console.warn('Treasury watcher:',String(e.message||e).slice(0,90)));},60000).unref();
 setTimeout(()=>{void tronDeposits.poll().then(r=>{if(r.credited)void drain();}).catch(e=>console.warn('TRON watcher startup:',String(e.message||e).slice(0,90)));void sharedWallet.poll().then(r=>{if(r.credited)void drain();}).catch(e=>console.warn('Treasury watcher startup:',String(e.message||e).slice(0,90)));},15000).unref();
