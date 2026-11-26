@@ -16,6 +16,7 @@ import {projectPrize,PLATFORM_FEE_BPS,FEE_POLICY_VERSION} from './fee-policy.mjs
 import {createSettlementJournal} from './settlement-journal.mjs';
 import {summarizeReadiness,OFFICIAL_GAMES} from './readiness.mjs';
 import {createMoneyEngine} from './money-engine.mjs';
+import {createWalletOps} from './wallet-ops.mjs';
 import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
@@ -47,6 +48,7 @@ const tronDeposits=createTronDeposits(db,(user,message)=>send(user,message));
 const botAdmin=createBotAdmin(db,enqueue);
 const sharedWallet=createSharedWallet(db,(user,message)=>send(user,message),{onEvent:event=>botAdmin.notify(event)});
 const moneyEngine=createMoneyEngine(db);
+const walletOps=createWalletOps(db);
 const pendingWalletInput=new Map();
 
 db.exec("CREATE TABLE IF NOT EXISTS arena_users(id INTEGER PRIMARY KEY, name TEXT NOT NULL, username TEXT NOT NULL DEFAULT '', first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL, blocked INTEGER NOT NULL DEFAULT 0, note TEXT NOT NULL DEFAULT ''); CREATE TABLE IF NOT EXISTS arena_rooms(id INTEGER PRIMARY KEY, title TEXT NOT NULL, last_seen INTEGER NOT NULL, enabled INTEGER NOT NULL DEFAULT 1); CREATE TABLE IF NOT EXISTS admin_audit(id INTEGER PRIMARY KEY, at INTEGER NOT NULL, action TEXT NOT NULL, target TEXT NOT NULL); CREATE TABLE IF NOT EXISTS arena_settings(key TEXT PRIMARY KEY,value TEXT NOT NULL)");
@@ -206,6 +208,17 @@ if(p[0]==='wallet'){walletMenu(cid,user);return;}
 if(p[0]==='wallet_history'){walletHistory(cid,user);return;}
 if(p[0]==='wallet_invoice'){walletInvoice(cid,user);return;}
 if(p[0]==='wallet_withdraw'){walletWithdraw(cid,user);return;}
+if(p[0]==='wo'&&['approve','reject'].includes(p[1])&&/^\\d+$/.test(p[2]||'')){
+ const valid=q.message?.chat?.type==='private'&&cid===user&&botAdmin.isAdmin(user);
+ if(!valid){send(cid,'관리자 개인 채팅에서만 출금을 처리할 수 있습니다.');return;}
+ const id=Number(p[2]),result=walletOps.withdrawal(id,p[1],'bot:'+user);
+ if(result.ok){
+  run('INSERT INTO admin_audit(at,action,target) VALUES(?,?,?)',Date.now(),'bot_withdraw_'+p[1],String(id)+' by '+user);
+  send(user,p[1]==='approve'?'✅ 출금 #'+id+' 승인 완료. 실제 온체인 송금은 아직 실행되지 않았습니다. 웹 관리자에서 송금 후 TXID로 완료 처리하세요.':'❌ 출금 #'+id+' 거절 완료. 보류 금액이 회원에게 환급됐습니다.');
+  send(result.user,p[1]==='approve'?'📤 출금 #'+id+' 신청이 승인되었습니다. 운영자가 송금을 진행합니다.':'↩️ 출금 #'+id+' 신청이 거절되어 보류 금액이 지갑 잔액으로 반환됐습니다.');
+ }else send(user,'이미 처리됐거나 현재 처리할 수 없는 출금입니다. ('+result.reason+')');
+ return;
+}
 if(p[0]==='botadmin'){if(botAdmin.isAdmin(user)&&cid===user)send(user,botAdmin.inbox(user),[[button('🔄 관리자 새로고침','botadmin')]]);else enqueue('answerCallbackQuery',{callback_query_id:q.id,text:'관리자 권한이 없습니다.',show_alert:true});return;}
 if(p[0]==='guide'){guide(cid);return;}
 if(chat.type==='private'){if(p[0]==='choose'){matchFlow.begin(user);return;}if(p[0]==='lobby'){matchFlow.lobby(user);return;}groupLink(cid);return;}
@@ -273,7 +286,7 @@ if(path==='/admin/login'&&req.method==='POST'){const ip=String(req.headers['x-re
 if(path==='/admin/logout'&&req.method==='POST'){res.writeHead(303,{'location':'/admin','set-cookie':'ga_admin=; Path=/admin; HttpOnly; Secure; SameSite=Strict; Max-Age=0'}).end();return true;}
 
 if(!adminAuth(req)){if(req.method!=='GET'){res.writeHead(403).end();return true;}adminPage(res,'<section class="login"><h1>GLORY ARENA</h1><p>관리자 전용 로그인</p><form method="post" action="/admin/login"><label>관리자 비밀번호<input type="password" name="password" required autocomplete="current-password"></label><button>로그인</button></form></section>');return true;}
-const sections={overview:'대시보드',users:'회원 관리',rooms:'방 관리',matches:'경기 관리',records:'판정 기록',games:'게임 설정',telegram:'텔레그램 계정 관리',requests:'대전 신청 관리',operations:'운영 안정성',readiness:'기능 최종 점검',settlement:'정산 감사 기록',deposits:'USDT 자동 입금',bot_admin:'봇 관리자',bot:'봇 설정',audit:'운영 로그'};
+const sections={overview:'대시보드',users:'회원 관리',rooms:'방 관리',matches:'경기 관리',records:'판정 기록',games:'게임 설정',telegram:'텔레그램 계정 관리',requests:'대전 신청 관리',operations:'운영 안정성',readiness:'기능 최종 점검',settlement:'정산 감사 기록',deposits:'입출금·잔액 관리',bot_admin:'봇 관리자',bot:'봇 설정',audit:'운영 로그'};
 const url=new URL(req.url,base);
 const tab=Object.hasOwn(sections,url.searchParams.get('tab'))?url.searchParams.get('tab'):'overview';
 const csrf=createHash('sha256').update(secret+':csrf:'+String(req.headers.cookie||'')).digest('hex');
@@ -289,7 +302,7 @@ if(act==='bot_admin_add'||act==='bot_admin_remove'){
  const result=botAdmin.setAdmin(user,act==='bot_admin_add');
  if(result){
    run('INSERT INTO admin_audit(at,action,target) VALUES(?,?,?)',Date.now(),act,String(user));
-   if(act==='bot_admin_add')send(user,'🛡 GLORY ARENA 봇 관리자 등록 완료\n\n이 채팅에서 /admin 명령어로 입출금 현황을 확인할 수 있습니다. 충전 및 출금 신청 알림이 이곳으로 전달됩니다.\n\n송금 승인 및 지갑 변경 권한은 제공되지 않습니다.');
+   if(act==='bot_admin_add')send(user,'🛡 GLORY ARENA 봇 관리자 등록 완료\n\n이 채팅에서 /admin 명령어로 입출금 현황을 확인할 수 있습니다. 충전 및 출금 신청 알림이 이곳으로 전달됩니다.\n\n출금 신청은 봇으로 승인·거절할 수 있으며 실제 송금은 운영자가 진행합니다.');
  }
  res.writeHead(303,{location:'/admin?tab=bot_admin&saved='+Number(result)}).end();void drain();return true;
 }
@@ -314,6 +327,25 @@ if(act==='enable_free_games'){
   db.exec('RELEASE enable_free_games');
  }catch(e){db.exec('ROLLBACK TO enable_free_games');db.exec('RELEASE enable_free_games');throw e;}
  res.writeHead(303,{location:'/admin?tab=readiness&saved=1'}).end();return true;
+}
+if(['wallet_manual_credit','wallet_manual_debit','wallet_manual_deposit'].includes(act)){
+ const kind=act==='wallet_manual_credit'?'credit':act==='wallet_manual_debit'?'debit':'manual_deposit';
+ const user=Number(q.get('user_id')),amount=(q.get('amount')||'').trim(),reference=(q.get('reference')||'').trim(),requestKey=q.get('request_key')||'';
+ const result=walletOps.operate({user,kind,amount,reference,requestKey,actor:'web_admin'});
+ if(result.ok){
+  run('INSERT INTO admin_audit(at,action,target) VALUES(?,?,?)',Date.now(),act,String(user)+':'+amount+':'+reference.slice(0,70));
+  send(user,kind==='debit'?'📉 관리자 잔액 조정: -'+amount+' USDT':'✅ '+(kind==='manual_deposit'?'수동 입금 반영':'관리자 잔액 조정')+': +'+amount+' USDT');
+ }
+ res.writeHead(303,{location:'/admin?tab=deposits&saved='+Number(result.ok)+'&reason='+encodeURIComponent(result.reason||'')}).end();void drain();return true;
+}
+if(['withdraw_approve','withdraw_reject','withdraw_paid'].includes(act)){
+ const wid=Number(q.get('withdrawal_id')),action=act==='withdraw_approve'?'approve':act==='withdraw_reject'?'reject':'paid';
+ const result=walletOps.withdrawal(wid,action,'web_admin',(q.get('txid')||'').trim());
+ if(result.ok){
+  run('INSERT INTO admin_audit(at,action,target) VALUES(?,?,?)',Date.now(),act,String(wid));
+  send(result.user,action==='approve'?'📤 출금 #'+wid+' 승인 완료 · 송금 대기':action==='reject'?'↩️ 출금 #'+wid+' 거절 · 보류금액 환급 완료':'✅ 출금 #'+wid+' 수동 송금 완료 처리 · TXID '+result.txid);
+ }
+ res.writeHead(303,{location:'/admin?tab=deposits&saved='+Number(result.ok)+'&reason='+encodeURIComponent(result.reason||'')}).end();void drain();return true;
 }
 if(act==='treasury_set'){
  const addr=(q.get('treasury_address')||'').trim();
@@ -495,7 +527,7 @@ form('bot_admin_add','', '<input name="admin_user_id" type="number" min="1" plac
 if(tab==='deposits'){
 const fixed=sharedWallet.status(),invoices=all('SELECT i.*,u.username FROM treasury_invoices i LEFT JOIN arena_users u ON u.id=i.user_id ORDER BY i.id DESC LIMIT 75'),requests=all('SELECT * FROM treasury_withdrawals ORDER BY id DESC LIMIT 75'),unmatched=all('SELECT * FROM treasury_unmatched ORDER BY detected DESC LIMIT 50');
 const st=tronDeposits.status();
-const addr=all("SELECT d.user_id,d.address,d.active_from,u.username,u.name,COALESCE(w.balance_micro,0) AS balance_micro FROM tron_deposit_addresses d JOIN arena_users u ON u.id=d.user_id LEFT JOIN tron_wallets w ON w.user_id=d.user_id ORDER BY d.created DESC LIMIT 75");
+const addr=all("SELECT u.id AS user_id,u.username,u.name,COALESCE(d.address,'-') AS address,COALESCE(d.active_from,0) AS active_from,COALESCE(w.balance_micro,0) AS balance_micro FROM arena_users u LEFT JOIN tron_deposit_addresses d ON d.user_id=u.id LEFT JOIN tron_wallets w ON w.user_id=u.id ORDER BY u.last_seen DESC LIMIT 100");
 const tx=all("SELECT d.txid,d.user_id,d.amount_micro,d.block_time,d.credited FROM tron_deposits d ORDER BY d.credited DESC LIMIT 75");
 const errors=all("SELECT * FROM tron_monitor_events WHERE kind!='address_set' ORDER BY id DESC LIMIT 20");
 content='<div class="grid">'+[['감시 상태',fixed.enabled&&fixed.apiConfigured?'활성':'설정 대기'],['TronGrid API',st.apiConfigured?'설정됨':'미설정'],['등록된 주소',st.addressCount],['자동 충전 건수',st.credits]].map(([k,v])=>'<section><small>'+esc(k)+'</small><div class="metric">'+esc(v)+'</div></section>').join('')+'</div>'+
@@ -507,7 +539,19 @@ form('tron_rescan','','지금 입금 재확인')+'</section>'+
 form('tron_assign','', '<input name="user_id" type="number" min="1" placeholder="회원 텔레그램 숫자 ID" required><input name="deposit_address" maxlength="34" placeholder="T로 시작하는 TRON 입금주소" required>','기존 회원별 주소 배정')+'</section>'+
 '<section><h2>공용 지갑 충전 신청</h2>'+table(['번호','회원','정확한 금액','상태','생성일','TXID'],invoices.map(r=>tr([r.id,r.username?'@'+r.username:r.user_id,usdtDisplay(r.amount_micro),r.status,date(r.created),r.txid||'-'])))+'</section>'+
 '<section><h2>미매칭 거래 · 관리자 확인</h2><p>미매칭 입금은 자동으로 다른 회원에게 배정하지 않습니다.</p>'+table(['TXID','수량','사유','감지 시각'],unmatched.map(r=>tr([r.txid,usdtDisplay(r.amount_micro),r.reason,date(r.detected)])))+'</section>'+
-'<section><h2>출금 신청 · 송금 연동 전</h2><p>신청액은 회원 잔액에서 보류 처리됩니다. 송금 기능은 연결되지 않아 자동 출금되지 않습니다. 요청 취소 시에만 잔액이 복구됩니다.</p>'+table(['번호','회원','받는 주소','USDT','상태','요청 시각','관리'],requests.map(r=>tr([r.id,r.user_id,r.to_address,usdtDisplay(r.amount_micro),r.status,date(r.created)],'<td>'+(r.status==='requested'?form('treasury_withdraw_cancel','', '<input name="withdrawal_id" type="hidden" value="'+r.id+'">','신청 취소·보류 해제'):'-')+'</td>')))+'</section>'+
+'<section><h2>회원 잔액 조절</h2><p>회원 ID와 증감 금액을 입력하세요. 기존 금전 기록은 삭제되지 않으며 조정 전후 잔액이 별도 기록됩니다. 차감 시 잔액 부족을 차단합니다.</p>'+
+form('wallet_manual_credit','', '<input name="request_key" type="hidden" value="'+randomBytes(16).toString('hex')+'"><input name="user_id" type="number" min="1" placeholder="회원 텔레그램 숫자 ID" required><input name="amount" placeholder="충전 금액 USDT" required><input name="reference" minlength="3" maxlength="160" placeholder="조정 사유 또는 관리번호" required>','잔액 추가')+
+form('wallet_manual_debit','', '<input name="request_key" type="hidden" value="'+randomBytes(16).toString('hex')+'"><input name="user_id" type="number" min="1" placeholder="회원 텔레그램 숫자 ID" required><input name="amount" placeholder="차감 금액 USDT" required><input name="reference" minlength="3" maxlength="160" placeholder="조정 사유 또는 관리번호" required>','잔액 차감')+'</section>'+
+'<section><h2>수동 입금 반영</h2><p>이미 자동 반영된 TXID는 중복 처리되지 않습니다. 수동 입금은 별도 기록으로 남으며 실제 블록체인 입금 확인을 의미하지 않습니다.</p>'+
+form('wallet_manual_deposit','', '<input name="request_key" type="hidden" value="'+randomBytes(16).toString('hex')+'"><input name="user_id" type="number" min="1" placeholder="입금 회원 숫자 ID" required><input name="amount" placeholder="반영할 USDT" required><input name="reference" minlength="3" maxlength="160" placeholder="고유 입금 관리번호 또는 TXID" required>','수동 입금 반영')+'</section>'+
+'<section><h2>출금 신청 · 수동 승인/거절</h2><p>승인은 송금 대기 상태로 변경하는 것이며 자동 온체인 송금이 아닙니다. 실제 송금 후 TXID를 등록해 완료 처리하세요. 거절 시 보류금이 회원 잔액으로 환급됩니다. 봇 관리자 개인 채팅에서도 승인·거절할 수 있습니다.</p>'+
+table(['번호','회원','출금 주소','USDT','상태','시각','관리'],requests.map(r=>tr([r.id,r.user_id,r.to_address,usdtDisplay(r.amount_micro),r.status,date(r.created)],'<td>'+(
+r.status==='requested'?form('withdraw_approve','', '<input type="hidden" name="withdrawal_id" value="'+r.id+'">','승인 · 송금 대기')+form('withdraw_reject','', '<input type="hidden" name="withdrawal_id" value="'+r.id+'">','거절 · 잔액 반환'):
+r.status==='approved'?form('withdraw_paid','', '<input type="hidden" name="withdrawal_id" value="'+r.id+'"><input name="txid" pattern="[a-fA-F0-9]{64}" minlength="64" maxlength="64" placeholder="실제 송금 TXID 64자리" required>','송금 완료 기록')+form('withdraw_reject','', '<input type="hidden" name="withdrawal_id" value="'+r.id+'">','승인 취소 · 반환'):'—')+'</td>')))+'</section>'+
+'<section><h2>수동 잔액·입금 처리 기록</h2>'+
+table(['회원','유형','금액 USDT','이전 잔액','변경 잔액','관리번호','시각'],walletOps.adjustments().map(r=>tr([r.user_id,r.kind,usdtDisplay(r.amount_micro),usdtDisplay(r.balance_before),usdtDisplay(r.balance_after),r.reference,date(r.created)])))+'</section>'+
+'<section><h2>출금 처리 기록</h2>'+
+table(['출금번호','처리','관리자','TXID','시각'],walletOps.withdrawalActions().map(r=>tr([r.withdrawal_id,r.action,r.actor,r.txid||'-',date(r.created)])))+'</section>'+
 '<section><h2>회원 지갑 현황</h2>'+table(['회원 ID','이름','입금주소','등록 시각','USDT 잔액'],addr.map(a=>tr([a.user_id,a.username?'@'+a.username:a.name,a.address,date(a.active_from),usdtDisplay(a.balance_micro)])))+'</section>'+
 '<section><h2>확정 입금 내역</h2>'+table(['거래 해시','회원 ID','충전 USDT','체인 시간','반영 시간'],tx.map(r=>tr([r.txid,r.user_id,usdtDisplay(r.amount_micro),date(r.block_time),date(r.credited)])))+'</section>'+
 '<section><h2>입금 감시 오류</h2>'+table(['시각','구분','내용'],errors.map(r=>tr([date(r.at),r.kind,r.detail])))+'</section>';
