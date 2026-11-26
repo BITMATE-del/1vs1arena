@@ -321,20 +321,18 @@ function announceMatchSettlement(id){
   if(!m)return;
   const request=one('SELECT code,stake_micro FROM match_requests WHERE match_id=?',id);
   const label=idOf=>matchBoard.player(idOf);
-  const resultWinner=m.a===m.b?null:(m.a>m.b?m.owner:m.guest);
-  const base='🏆 GLORY ARENA · 경기 결과 및 정산 안내\n'+
-    '━━━━━━━━━━━━━━\n'+
-    '🎫 매치: '+(request?.code||'#'+id)+'\n'+
-    '🎮 경기: '+m.game+' · '+m.rounds+'판\n'+
-    '👤 A: '+label(m.owner)+'\n'+
-    '👤 B: '+label(m.guest)+'\n'+
-    '📊 최종 점수: A '+m.a+' : '+m.b+' B\n'+
-    (m.state==='cancelled'?'🛑 중도 종료 · 결과 미확정\n':
-      resultWinner?'🥇 최종 승리: '+label(resultWinner)+'\n🥈 패배: '+label(resultWinner===m.owner?m.guest:m.owner)+'\n':'🤝 최종 결과: 무승부\n');
+  const code=request?.code||'#'+id;
+  const winnerId=m.state==='finished'&&m.a!==m.b?(m.a>m.b?m.owner:m.guest):null;
+  const title='🏆 GLORY ARENA | 챔피언 탄생 🏆\n━━━━━━━━━━━━━━━━\n\n';
+  const score='\n\n🎮 '+m.game+' · '+m.rounds+'판\n📊 최종 스코어  A '+m.a+' : '+m.b+' B\n🎫 매치 코드: '+code;
   const escrow=moneyEngine.escrow(id);
   if(!escrow){
-    // A free match does not create an escrow or a monetary settlement.
-    send(m.chat,base+'\n💎 대전 금액: 0 USDT (무료 경기)\n💰 지급 금액: 0 USDT\n🧾 수수료: 0 USDT\n✅ 실제 지갑 잔액 변동은 없습니다.\n\n추가 경기 여부를 선택해 주세요.');
+    const headline=m.state==='cancelled'?'🛑 경기가 중단되었습니다.':winnerId?'🎉 '+label(winnerId)+' 님, 승리를 축하드립니다!':'🤝 치열한 승부 끝에 무승부로 종료되었습니다.';
+    send(m.chat,title+headline+score+
+      '\n\n💎 베팅금액: 0 USDT (무료 대전)'+
+      '\n💰 총 정산금액: 0 USDT'+
+      '\n📈 최종 수익: 0 USDT'+
+      '\n✅ 무료 경기로 잔액 변동은 없습니다.\n━━━━━━━━━━━━━━━━\n⚜️ 다음 승부에서도 행운을 빕니다!');
     return;
   }
   let settled;
@@ -342,42 +340,49 @@ function announceMatchSettlement(id){
   catch(e){console.error('Arena settlement pending',{match:id,reason:String(e?.message||e).slice(0,120)});}
   const record=one('SELECT * FROM money_settlements WHERE match_id=?',id);
   if(!settled?.ok||!record){
-    send(m.chat,base+'\n⚠️ USDT 정산 확인 중\n게임 결과는 기록되었습니다. 참가금은 정산 완료가 확인되기 전까지 지급 완료로 표시되지 않습니다.\n운영자에게 정산 상태를 확인해 주세요.');
+    send(m.chat,'🏆 GLORY ARENA | 경기 종료\n━━━━━━━━━━━━━━━━\n'+
+      '최종 점수 A '+m.a+' : '+m.b+' B\n매치 코드: '+code+
+      '\n\n⚠️ USDT 정산 확인 중입니다.\n정산 원장에 지급 기록이 확인되기 전에는 지급 완료로 안내하지 않습니다.');
     return;
   }
-  if(settled.reused)return; // Do not post duplicated announcements on repeated callbacks.
+  if(settled.reused)return;
   const stakeA=BigInt(escrow.stake_a),stakeB=BigInt(escrow.stake_b),pool=stakeA+stakeB;
   const fmt=n=>usdtDisplay(Number(n))+' USDT';
-  const lines=['\n💎 USDT 정산 내역',
-    'A 참가금: '+fmt(stakeA),
-    'B 참가금: '+fmt(stakeB),
-    '총 판돈: '+fmt(pool)];
+  let announcement='';
   if(record.decision==='refund'){
-    lines.push('↩️ 정산 결과: '+(record.reason==='cancelled'?'중도 종료':'무승부')+' · 각자 참가금 전액 반환',
-      'A 반환액: '+fmt(stakeA),'B 반환액: '+fmt(stakeB),
-      '수수료: 0 USDT','✅ 두 회원의 내부 지갑으로 각각 환급 완료');
+    announcement='🤝 '+(record.reason==='cancelled'?'경기가 중단되었습니다.':'무승부로 경기가 종료되었습니다.')+score+
+      '\n\n💎 A 베팅금액: '+fmt(stakeA)+
+      '\n💎 B 베팅금액: '+fmt(stakeB)+
+      '\n↩️ A 총 정산금액: '+fmt(stakeA)+
+      '\n↩️ B 총 정산금액: '+fmt(stakeB)+
+      '\n🧾 수수료: 0 USDT'+
+      '\n✅ 양쪽 참가자에게 각각 전액 환급 완료';
   }else{
     const winner=Number(record.winner),loser=winner===m.owner?m.guest:m.owner;
-    const prize=BigInt(record.payout_micro),fee=BigInt(record.fee_micro);
-    const winnerStake=winner===m.owner?stakeA:stakeB;
-    lines.push('🥇 수령 회원: '+label(winner),
-      '승자 지급액: '+fmt(prize)+' (참가금 포함)',
-      '승자 순손익: +'+fmt(prize-winnerStake),
-      '패자: '+label(loser)+' · 참가금 손실 '+fmt(loser===m.owner?stakeA:stakeB),
-      '운영 수수료 (총 판돈의 3%): '+fmt(fee),
-      '✅ 승자 내부 지갑으로 지급 완료');
+    const payout=BigInt(record.payout_micro),fee=BigInt(record.fee_micro);
+    const ownStake=winner===m.owner?stakeA:stakeB;
+    announcement='🎊 '+label(winner)+' 님!\n\n🏅 승리를 진심으로 축하드립니다!'+score+
+      '\n\n💎 베팅금액: '+fmt(ownStake)+
+      '\n🏦 총 판돈: '+fmt(pool)+
+      '\n💰 총 정산금액: '+fmt(payout)+
+      '\n📈 최종 순수익: +'+fmt(payout-ownStake)+
+      '\n🧾 운영 수수료 (3%): '+fmt(fee)+
+      '\n\n✅ 승리 상금이 회원님의 GLORY ARENA 내부 USDT 지갑으로 지급되었습니다.'+
+      '\n🥈 상대 참가자: '+label(loser)+
+      '\n패배 참가금: '+fmt(loser===m.owner?stakeA:stakeB);
   }
-  send(m.chat,base+lines.join('\n')+'\n\n추가 경기 여부를 선택해 주세요.');
+  send(m.chat,title+announcement+'\n━━━━━━━━━━━━━━━━\n⚜️ 영광의 승부를 축하드립니다!');
   for(const user of [m.owner,m.guest]){
-    const role=user===m.owner?'A':'B';
     const balance=moneyEngine.balance(user);
-    let status;
-    if(record.decision==='refund')status='참가금 환급 완료: '+fmt(user===m.owner?stakeA:stakeB);
-    else if(Number(record.winner)===user)status='승리 지급 완료: '+fmt(BigInt(record.payout_micro));
-    else status='패배 · 참가금 손실: '+fmt(user===m.owner?stakeA:stakeB);
-    send(user,'💎 GLORY ARENA · 개인 정산서\n'+
-      '매치: '+(request?.code||'#'+id)+'\n'+role+' '+label(user)+'\n'+
-      status+'\n현재 내부 USDT 잔액: '+fmt(balance)+'\n\n봇의 USDT 지갑 메뉴에서 거래내역을 확인하세요.');
+    const paid=record.decision==='winner'&&Number(record.winner)===user;
+    const stake=user===m.owner?stakeA:stakeB;
+    const status=record.decision==='refund'?'↩️ 베팅금액 반환: '+fmt(stake):
+      paid?'🏆 우승 지급금: '+fmt(BigInt(record.payout_micro))+'\n📈 순수익: +'+fmt(BigInt(record.payout_micro)-stake):
+      '🥈 경기 패배 · 베팅금액: '+fmt(stake);
+    send(user,'🏆 GLORY ARENA | 경기 정산서\n━━━━━━━━━━━━━━\n'+
+      '🎫 '+code+'\n'+status+
+      '\n💳 현재 내부 지갑 잔액: '+fmt(balance)+
+      '\n\n입출금 및 경기 정산 내역은 USDT 지갑 메뉴에서 확인하실 수 있습니다.');
   }
 }
 matchFlow=createMatchFlow(db,send,roomService,games,modes,rounds,{gameEnabled,money:moneyEngine,paidMatchesEnabled:()=>setting('paid_matches_enabled','1')==='1',onMatchStart:id=>{matchWatch.arm(id);matchBoard.queueMatch(id);},onMatchEnd:id=>announceMatchSettlement(id),onMatchStopped:id=>{matchWatch.touch(id);matchBoard.queueMatch(id);},onCloseFailed:(id,code)=>matchWatch.incident('room_close_failed',id||0,'그룹 종료 실패 '+code)});
