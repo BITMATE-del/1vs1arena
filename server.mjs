@@ -13,6 +13,7 @@ import {createTronDeposits,usdtDisplay} from './tron-deposits.mjs';
 import {createSharedWallet} from './shared-wallet.mjs';
 import {createBotAdmin} from './bot-admin.mjs';
 import {projectPrize,PLATFORM_FEE_BPS,FEE_POLICY_VERSION} from './fee-policy.mjs';
+import {createSettlementJournal} from './settlement-journal.mjs';
 import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
@@ -39,6 +40,7 @@ const all=(sql,...args)=>db.prepare(sql).all(...args);
 const run=(sql,...args)=>db.prepare(sql).run(...args);
 const button=(text,callback_data)=>({text,callback_data});
 const specialDice=createSpecialDiceEngine(db);
+const settlementJournal=createSettlementJournal(db);
 const tronDeposits=createTronDeposits(db,(user,message)=>send(user,message));
 const botAdmin=createBotAdmin(db,enqueue);
 const sharedWallet=createSharedWallet(db,(user,message)=>send(user,message),{onEvent:event=>botAdmin.notify(event)});
@@ -254,7 +256,7 @@ if(path==='/admin/login'&&req.method==='POST'){const ip=String(req.headers['x-re
 if(path==='/admin/logout'&&req.method==='POST'){res.writeHead(303,{'location':'/admin','set-cookie':'ga_admin=; Path=/admin; HttpOnly; Secure; SameSite=Strict; Max-Age=0'}).end();return true;}
 
 if(!adminAuth(req)){if(req.method!=='GET'){res.writeHead(403).end();return true;}adminPage(res,'<section class="login"><h1>GLORY ARENA</h1><p>관리자 전용 로그인</p><form method="post" action="/admin/login"><label>관리자 비밀번호<input type="password" name="password" required autocomplete="current-password"></label><button>로그인</button></form></section>');return true;}
-const sections={overview:'대시보드',users:'회원 관리',rooms:'방 관리',matches:'경기 관리',records:'판정 기록',games:'게임 설정',telegram:'텔레그램 계정 관리',requests:'대전 신청 관리',operations:'운영 안정성',deposits:'USDT 자동 입금',bot_admin:'봇 관리자',bot:'봇 설정',audit:'운영 로그'};
+const sections={overview:'대시보드',users:'회원 관리',rooms:'방 관리',matches:'경기 관리',records:'판정 기록',games:'게임 설정',telegram:'텔레그램 계정 관리',requests:'대전 신청 관리',operations:'운영 안정성',settlement:'정산 감사 기록',deposits:'USDT 자동 입금',bot_admin:'봇 관리자',bot:'봇 설정',audit:'운영 로그'};
 const url=new URL(req.url,base);
 const tab=Object.hasOwn(sections,url.searchParams.get('tab'))?url.searchParams.get('tab'):'overview';
 const csrf=createHash('sha256').update(secret+':csrf:'+String(req.headers.cookie||'')).digest('hex');
@@ -393,6 +395,12 @@ return tr([m.id,m.chat,owner,guest,(games[m.game]?.[0]||m.game)+' · '+(modes[m.
 }))+paging()+'</section>';}
 if(tab==='records'){const rows=all("SELECT * FROM rolls WHERE CAST(match AS TEXT) LIKE ? OR CAST(player AS TEXT) LIKE ? OR CAST(chat AS TEXT) LIKE ? ORDER BY rowid DESC LIMIT 50 OFFSET ?",like,like,like,offset);
 content='<section><h2>텔레그램 원본 판정</h2><p>수신한 공식 이모지 결과와 메시지 번호를 조회합니다. 수정 및 삭제 기능은 제공하지 않습니다.</p>'+finder()+table(['경기','그룹','메시지 ID','라운드','참가자','공식 값'],rows.map(r=>tr([r.match,r.chat,r.message,r.round,r.player,r.value])))+paging()+'</section>';}
+if(tab==='settlement'){
+const stat=settlementJournal.summary(),entries=settlementJournal.entries();
+content='<section><h2>경기별 판정 및 환급 정책</h2><p>승패 확정: 총 참가금의 3%를 수수료로 산정하며 나머지 97%를 승리자에게 배정하는 계산 정책입니다. 동액 참가인 경우 1.94배 지급 예정입니다.</p><p>무승부: 양쪽 참가금 전액 반환 · 수수료 0%. 경기 시작 전 취소·상호 동의 중단·시간초과 중단·관리자 강제 종료: 양측 참가금 전액 반환 · 수수료 0%. 완료된 승패 기록은 이후 방 종료와 관계없이 유지됩니다.</p><p><strong>현재는 계산 규칙과 감사 기록만 구현되며, 회원 잔액 차감·환급·승리금 지급은 실행되지 않습니다.</strong> 역사적 무료 게임은 수수료 정책 적용에서 제외됩니다.</p></section>'+
+'<div class="grid">'+[['기록된 종료 경기',stat.total],['무승부·중단 환급 대상',stat.refunds],['승자 정산 예정',stat.winners],['과거 기록 제외 경계',stat.cutoff]].map(([k,v])=>'<section><small>'+esc(k)+'</small><div class="metric">'+esc(v)+'</div></section>').join('')+'</div>'+
+'<section><h2>읽기 전용 정산 감사 기록</h2><p>경기번호별 최초 판정만 등록하고 같은 경기의 중복 기록을 차단합니다. 이벤트 변경 및 삭제는 DB에서 금지됩니다. 감사 해시로 기록 내용의 일치 여부를 확인합니다.</p>'+table(['경기 ID','기록 시각','경기 결과','정산 정책','승자 ID','수수료율','변경 검증','금전 처리'],entries.map(e=>tr([e.match_id,date(e.created),e.match_state,e.decision==='refund_both'?'전액 환급 예정 · '+e.reason:'승자 지급 예정',e.winner_id||'-',(e.fee_bps/100)+'%',settlementJournal.verify(e)?'정상':'검증 실패','시뮬레이션 · 미집행'])))+'</section>';
+}
 if(tab==='games'){
  const sample=projectPrize(100000000n);
  content='<section><h2>경기 정산 수수료 정책</h2><p>정책 버전: '+esc(FEE_POLICY_VERSION)+'</p><p><strong>총 판돈의 '+(PLATFORM_FEE_BPS/100)+'% 수수료</strong> · 양쪽이 같은 금액을 참가하는 경우 승리자 지급 비율 1.94배입니다.</p><p>예시: 양측 100 USDT씩, 합계 200 USDT → 수수료 '+usdtDisplay(sample.fee)+' USDT → 승리자 지급 예정 '+usdtDisplay(sample.winnerPayout)+' USDT.</p><p>현재 정책은 시뮬레이션·운영 설계 정보이며 실제 경기 입장금 차감, 승리금 적립, USDT 송금은 <strong>연결하지 않았습니다</strong>. 기존 무료 경기와 회원 지갑 잔액에 영향을 주지 않습니다. 무승부/취소 시 환급 규칙은 별도 정의가 필요합니다.</p></section>';
@@ -481,6 +489,6 @@ webhookReady=true;console.log('Webhook update accepted',u.update_id);res.writeHe
 }catch(e){console.error('Webhook processing failed',e?.name||'Error',String(e?.message||'unknown').slice(0,180));res.writeHead(500).end();}
 });
 server.listen(port,'0.0.0.0',()=>{console.log('GLORY ARENA HTTP server listening on',port);void register();});
-setInterval(()=>{void drain();void roomService.work();roomService.recover();matchFlow.tick();matchWatch.sync();matchWatch.tick();},5000).unref();
+setInterval(()=>{void drain();void roomService.work();roomService.recover();matchFlow.tick();matchWatch.sync();matchWatch.tick();settlementJournal.reconcile();},5000).unref();
 setInterval(()=>{void tronDeposits.poll().then(r=>{if(r.credited)void drain();}).catch(e=>console.warn('TRON watcher:',String(e.message||e).slice(0,90)));void sharedWallet.poll().then(r=>{if(r.credited)void drain();}).catch(e=>console.warn('Treasury watcher:',String(e.message||e).slice(0,90)));},60000).unref();
 setTimeout(()=>{void tronDeposits.poll().then(r=>{if(r.credited)void drain();}).catch(e=>console.warn('TRON watcher startup:',String(e.message||e).slice(0,90)));void sharedWallet.poll().then(r=>{if(r.credited)void drain();}).catch(e=>console.warn('Treasury watcher startup:',String(e.message||e).slice(0,90)));},15000).unref();
